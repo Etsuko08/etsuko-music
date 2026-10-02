@@ -554,7 +554,7 @@ class EtsukoApp {
 
     if (this.btnUpdateBrowser) {
       this.btnUpdateBrowser.addEventListener('click', () => {
-        const url = this.latestUpdateData?.downloadUrl || 'https://github.com/khalilmalik0808/etsuko-music/releases';
+        const url = this.latestUpdateData?.downloadUrl || 'https://github.com/Etsuko08/etsuko-music/releases';
         window.open(url, '_blank');
       });
     }
@@ -602,7 +602,7 @@ class EtsukoApp {
         }
         if (manual && window.showToast) window.showToast(`Update v${data.latestVersion} available!`);
       } else if (manual) {
-        if (window.showToast) window.showToast(`You're running the latest version! (v${data.currentVersion || '69.2'})`);
+        if (window.showToast) window.showToast(`You're running the latest version! (v${data.currentVersion || '69.5'})`);
       }
     } catch (e) {
       if (manual && window.showToast) window.showToast('Could not reach update server');
@@ -619,7 +619,7 @@ class EtsukoApp {
     // Open Progress Modal
     if (this.modalUpdateProgress) {
       this.modalUpdateProgress.style.display = 'flex';
-      if (this.updateModalTitle) this.updateModalTitle.textContent = `DOWNLOADING UPDATE // v${this.latestUpdateData.latestVersion || '69.4'}`;
+      if (this.updateModalTitle) this.updateModalTitle.textContent = `DOWNLOADING UPDATE // v${this.latestUpdateData.latestVersion || '69.5'}`;
       if (this.updateModalStatus) this.updateModalStatus.textContent = 'Connecting to download cluster...';
       if (this.updateProgressFill) this.updateProgressFill.style.width = '0%';
       if (this.updateStatPercent) this.updateStatPercent.textContent = '0.0%';

@@ -48,8 +48,8 @@ app = Bottle()
 CACHE_EXPIRY = 1800  # 30 mins
 STREAM_CACHE = {}
 
-APP_VERSION = "69.4"
-UPDATE_BEACON_URL = "https://raw.githubusercontent.com/khalilmalik0808/etsuko-music/main/version.json"
+APP_VERSION = "69.5"
+UPDATE_BEACON_URL = "https://raw.githubusercontent.com/Etsuko08/etsuko-music/main/version.json"
 
 DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), ".etsuko", "downloads")
 os.makedirs(DOWNLOADS_DIR, exist_ok=True)
