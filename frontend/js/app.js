@@ -357,18 +357,18 @@ class EtsukoApp {
       this.queueDrawer.classList.remove('open');
     });
     this.btnClearQueue.addEventListener('click', () => {
-      window.player.queue = window.player.currentTrack ? [window.player.currentTrack] : [];
-      window.player.queueIndex = 0;
+      if (window.player) {
+        window.player.clearUpcomingQueue();
+      }
       this.renderQueue();
     });
 
-    // Lyrics toggle
+    // Lyrics toggle opens expanded player on lyrics panel
     this.btnLyricsToggle.addEventListener('click', () => {
-      if (this.currentView === 'lyrics') {
-        this.goBack();
-      } else {
-        this.navigateTo('lyrics');
-        this.loadLyricsForCurrentTrack();
+      if (window.player) {
+        const lyricsTab = document.getElementById('tab-btn-lyrics');
+        if (lyricsTab) lyricsTab.click();
+        window.player.openExpandedPlayer();
       }
     });
 
@@ -507,6 +507,7 @@ class EtsukoApp {
 
     window.addEventListener('etsuko:queue-updated', () => this.renderQueue());
     window.addEventListener('etsuko:library-updated', () => this.loadLibrary());
+    window.addEventListener('etsuko:downloads-updated', () => this.loadLibrary());
     window.addEventListener('etsuko:track-like-changed', (e) => {
       const { videoId, isLiked } = e.detail || {};
       if (!videoId) return;
@@ -1011,8 +1012,15 @@ class EtsukoApp {
     }
 
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&filter=${this.activeSearchFilter}`, { signal });
-      const data = await res.json();
+      let results = [];
+      if (window.api && typeof window.api.search === 'function') {
+        const searchData = await window.api.search(query, this.activeSearchFilter, signal);
+        results = searchData.results || [];
+      } else {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}&filter=${this.activeSearchFilter}`, { signal });
+        const data = await res.json();
+        results = data.results || [];
+      }
 
       // Guard: Discard stale response if a newer search was initiated
       if (currentReqId !== this.searchRequestId) {
@@ -1021,7 +1029,6 @@ class EtsukoApp {
 
       this.searchLoading.style.display = 'none';
 
-      const results = data.results || [];
       if (results.length === 0) {
         this.searchTracksList.innerHTML = `
           <div style="color:var(--text-sub); padding: 32px 16px; text-align:center;">
@@ -1136,10 +1143,13 @@ class EtsukoApp {
         <div class="top-result-meta">${top.artist} • ${top.album || 'Track'}</div>
         <div class="top-result-type">Track</div>
       `;
-      this.topResultCard.onclick = () => window.player.playTrack(top, results);
+      this.topResultCard.onclick = () => {
+        window.player.playTrack(top, null);
+        window.player.openExpandedPlayer();
+      };
 
       results.forEach((track, idx) => {
-        const row = this.createTrackRow(track, idx + 1, results, false, null);
+        const row = this.createTrackRow(track, idx + 1, null, false, null);
         this.searchTracksList.appendChild(row);
       });
     } catch (e) {
@@ -1232,7 +1242,12 @@ class EtsukoApp {
       }
 
       // 4. Default: Play Track
-      window.player.playTrack(track, listContext);
+      if (this.currentView === 'search') {
+        window.player.playTrack(track, null);
+        window.player.openExpandedPlayer();
+      } else {
+        window.player.playTrack(track, listContext);
+      }
     });
 
     return row;
@@ -1379,11 +1394,46 @@ class EtsukoApp {
         };
       }
 
+      // Downloaded offline tracks shortcut card
+      let dlCard = document.querySelector('.library-card[data-playlist="downloaded"]');
+      if (!dlCard && likedCard) {
+        dlCard = document.createElement('div');
+        dlCard.className = 'library-card';
+        dlCard.setAttribute('data-playlist', 'downloaded');
+        dlCard.innerHTML = `
+          <div class="liked-heart-box" style="background: linear-gradient(135deg, #10b981, #059669);">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="white" stroke-width="2.5">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+          </div>
+          <div class="library-card-info">
+            <div class="library-card-title">Downloaded</div>
+            <div class="library-card-sub" id="downloaded-count-badge">0 tracks offline</div>
+          </div>
+        `;
+        likedCard.after(dlCard);
+      }
+
+      if (dlCard) {
+        try {
+          const dlRes = await fetch('/api/download/tracks');
+          const dlData = await dlRes.json();
+          const dlCount = (dlData.tracks || []).length;
+          const dlBadge = document.getElementById('downloaded-count-badge');
+          if (dlBadge) dlBadge.textContent = `${dlCount} tracks offline`;
+          dlCard.onclick = () => {
+            this.openPlaylistView(null, 'Downloaded Tracks', 'Saved locally for offline playback', dlData.tracks || []);
+          };
+        } catch (e) {}
+      }
+
       // User Playlists
       const plRes = await fetch('/api/library/playlists');
       const plData = await plRes.json();
       
-      const customElements = this.libraryPlaylists.querySelectorAll('.library-card:not([data-playlist="liked"])');
+      const customElements = this.libraryPlaylists.querySelectorAll('.library-card:not([data-playlist="liked"]):not([data-playlist="downloaded"])');
       customElements.forEach(el => el.remove());
 
       (plData.playlists || []).forEach(pl => {
@@ -1662,9 +1712,9 @@ class EtsukoApp {
       });
     }
 
-    // Autoplay recommendations
+    // Autoplay recommendations from single source of truth (Recommended For You pool)
     this.queueAutoplayList.innerHTML = '';
-    const autoplayList = (window.player.autoplayTracks || []).slice(0, 8);
+    const autoplayList = (window.player.recommendedTracks || []).slice(0, 10);
     if (autoplayList.length === 0) {
       this.queueAutoplayList.innerHTML = `
         <div style="color:var(--text-muted); font-size:12px; padding: 12px 6px; text-align:center;">
@@ -1676,7 +1726,7 @@ class EtsukoApp {
         const item = document.createElement('div');
         item.className = 'queue-track-item';
         item.innerHTML = `
-          <img src="${t.thumbnail}" alt="${t.title}" onerror="this.onerror=null; this.src='assets/default_cover.png';" loading="lazy">
+          <img src="${t.thumbnail || 'assets/default_cover.png'}" alt="${t.title}" onerror="this.onerror=null; this.src='assets/default_cover.png';" loading="lazy">
           <div class="queue-track-info">
             <div class="queue-track-title" title="${t.title}">${t.title}</div>
             <div class="queue-track-artist" title="${t.artist}">${t.artist}</div>
@@ -1690,6 +1740,10 @@ class EtsukoApp {
 
         item.onclick = (e) => {
           if (e.target.closest('.btn-queue-add')) return;
+          window.player.recommendedTracks = window.player.recommendedTracks.filter(item => item.videoId !== t.videoId);
+          window.player.queue = [t, ...window.player.recommendedTracks];
+          window.player.queueIndex = 0;
+          window.player.isExplicitQueue = false;
           window.player.playTrack(t);
         };
 

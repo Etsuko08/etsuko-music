@@ -51,6 +51,9 @@ STREAM_CACHE = {}
 APP_VERSION = "69.4"
 UPDATE_BEACON_URL = "https://raw.githubusercontent.com/khalilmalik0808/etsuko-music/main/version.json"
 
+DOWNLOADS_DIR = os.path.join(os.path.expanduser("~"), ".etsuko", "downloads")
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+
 try:
     ytmusic = YTMusic()
 except Exception as e:
@@ -310,6 +313,11 @@ def get_stream_url(video_id):
 
 @app.route('/api/proxy_stream/<video_id>', method=['GET'])
 def proxy_audio_stream(video_id):
+    # Instant offline serving if track was downloaded locally
+    local_file = os.path.join(DOWNLOADS_DIR, f"{video_id}.m4a")
+    if os.path.exists(local_file) and os.path.getsize(local_file) > 10000:
+        return static_file(f"{video_id}.m4a", root=DOWNLOADS_DIR, mimetype="audio/mp4")
+
     stream_url = resolve_audio_stream(video_id)
     if not stream_url:
         return HTTPResponse(status=404, body="Stream not found")
@@ -411,28 +419,79 @@ def get_album_details(browse_id):
         print(f"[Etsuko] Error fetching album {browse_id}: {e}")
         return HTTPResponse(status=500, body=json.dumps({"error": str(e)}))
 
+def fetch_ml_radio(video_id):
+    try:
+        res = requests.post(
+            'https://music.youtube.com/youtubei/v1/next',
+            json={
+                'context': {'client': {'clientName': 'WEB_REMIX', 'clientVersion': '1.20260928.01.00', 'hl': 'en'}},
+                'playlistId': f'RDAMVM{video_id}',
+                'videoId': video_id,
+                'enablePersistentPlaylistPanel': True,
+                'isAudioOnly': True
+            },
+            headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'},
+            timeout=6
+        )
+        if res.status_code == 200:
+            data = res.json()
+            panel = data.get('contents', {}).get('singleColumnMusicWatchNextResultsRenderer', {}).get('tabbedRenderer', {}).get('watchNextTabbedResultsRenderer', {}).get('tabs', [{}])[0].get('tabRenderer', {}).get('content', {}).get('musicQueueRenderer', {}).get('content', {}).get('playlistPanelRenderer', {})
+            items = panel.get('contents', [])
+            tracks = []
+            for item in items:
+                v = item.get('playlistPanelVideoRenderer', {})
+                vid = v.get('videoId')
+                if not vid or vid == video_id:
+                    continue
+                title = v.get('title', {}).get('runs', [{}])[0].get('text', 'Unknown')
+                artist = ''.join(r.get('text', '') for r in v.get('longBylineText', {}).get('runs', [])).split('•')[0].strip() or 'Unknown'
+                duration = v.get('lengthText', {}).get('runs', [{}])[0].get('text', '3:30')
+                thumbs = v.get('thumbnail', {}).get('thumbnails', [])
+                thumb = thumbs[-1].get('url') if thumbs else f'https://i.ytimg.com/vi/{vid}/hqdefault.jpg'
+                if '=' in thumb:
+                    thumb = thumb.split('=')[0] + '=w544-h544-l90-rj'
+                tracks.append({
+                    'videoId': vid,
+                    'title': title,
+                    'artist': artist,
+                    'duration': duration,
+                    'thumbnail': thumb,
+                    'isLiked': db.is_liked(vid)
+                })
+            return tracks
+    except Exception as e:
+        print(f"[Etsuko] ML Radio fetch notice: {e}")
+    return []
+
 @app.route('/api/radio/<video_id>', method=['GET'])
 def get_radio(video_id):
+    # 1. Primary: YouTube ML Radio (RDAMVM) - official machine learning queue
+    ml_tracks = fetch_ml_radio(video_id)
+    if ml_tracks and len(ml_tracks) > 0:
+        return {"tracks": ml_tracks}
+
+    # 2. Fallback: ytmusicapi watch playlist
     try:
-        watch_playlist = ytmusic.get_watch_playlist(videoId=video_id, limit=20)
-        tracks = []
-        for track in watch_playlist.get('tracks', []):
-            tid = track.get('videoId')
-            if not tid or tid == video_id:
-                continue
-            artists = ", ".join([a['name'] for a in track.get('artists', [{'name': 'Unknown'}])])
-            tracks.append({
-                "videoId": tid,
-                "title": track.get('title', 'Unknown Track'),
-                "artist": artists,
-                "duration": track.get('length', '3:00'),
-                "thumbnail": clean_thumbnail(track.get('thumbnail', [])),
-                "isLiked": db.is_liked(tid)
-            })
-        return {"tracks": tracks}
+        if ytmusic:
+            watch_playlist = ytmusic.get_watch_playlist(videoId=video_id, limit=20)
+            tracks = []
+            for track in watch_playlist.get('tracks', []):
+                tid = track.get('videoId')
+                if not tid or tid == video_id:
+                    continue
+                artists = ", ".join([a['name'] for a in track.get('artists', [{'name': 'Unknown'}])])
+                tracks.append({
+                    "videoId": tid,
+                    "title": track.get('title', 'Unknown Track'),
+                    "artist": artists,
+                    "duration": track.get('length', '3:00'),
+                    "thumbnail": clean_thumbnail(track.get('thumbnail', [])),
+                    "isLiked": db.is_liked(tid)
+                })
+            return {"tracks": tracks}
     except Exception as e:
-        print(f"[Etsuko] Radio error: {e}")
-        return {"tracks": []}
+        print(f"[Etsuko] Radio fallback error: {e}")
+    return {"tracks": []}
 
 @app.route('/api/lyrics/<video_id>', method=['GET'])
 def get_lyrics(video_id):
@@ -440,9 +499,12 @@ def get_lyrics(video_id):
     artist = request.query.get('artist', '')
 
     # 1. Try LRCLIB for synced lyrics
-    if title and artist:
+    if title:
         try:
-            params = urllib.parse.urlencode({"track_name": title, "artist_name": artist})
+            params_dict = {"track_name": title}
+            if artist and artist != 'Unknown Artist':
+                params_dict["artist_name"] = artist
+            params = urllib.parse.urlencode(params_dict)
             lrclib_url = f"https://lrclib.net/api/get?{params}"
             req = urllib.request.Request(lrclib_url, headers={'User-Agent': 'EtsukoMusicPlayer/1.0'})
             with urllib.request.urlopen(req, timeout=4) as resp:
@@ -460,20 +522,88 @@ def get_lyrics(video_id):
 
     # 2. Try YouTube Music lyrics
     try:
-        watch_data = ytmusic.get_watch_playlist(videoId=video_id)
-        lyrics_browse_id = watch_data.get('lyrics')
-        if lyrics_browse_id:
-            lyrics_data = ytmusic.get_lyrics(lyrics_browse_id)
-            if lyrics_data and lyrics_data.get('lyrics'):
-                return {
-                    "synced": None,
-                    "plain": lyrics_data.get('lyrics'),
-                    "source": "YouTube Music"
-                }
+        if ytmusic:
+            watch_data = ytmusic.get_watch_playlist(videoId=video_id)
+            lyrics_browse_id = watch_data.get('lyrics')
+            if lyrics_browse_id:
+                lyrics_data = ytmusic.get_lyrics(lyrics_browse_id)
+                if lyrics_data and lyrics_data.get('lyrics'):
+                    return {
+                        "synced": None,
+                        "plain": lyrics_data.get('lyrics'),
+                        "source": "YouTube Music"
+                    }
     except Exception as e:
         print(f"[Etsuko] Lyrics error: {e}")
 
     return {"synced": None, "plain": "No lyrics found for this track.", "source": "None"}
+
+# --- Offline Downloads Subsystem ---
+@app.route('/api/download/track', method=['POST', 'OPTIONS'])
+def download_track():
+    if request.method == 'OPTIONS':
+        return {}
+    data = request.json or {}
+    video_id = data.get('videoId')
+    if not video_id:
+        return HTTPResponse(status=400, body=json.dumps({"error": "Missing videoId"}))
+
+    local_path = os.path.join(DOWNLOADS_DIR, f"{video_id}.m4a")
+    if os.path.exists(local_path) and os.path.getsize(local_path) > 10000:
+        db.save_downloaded_track(data, local_path)
+        return {"success": True, "alreadyDownloaded": True, "localPath": local_path}
+
+    def do_download():
+        try:
+            stream_url = resolve_audio_stream(video_id)
+            if not stream_url:
+                print(f"[Etsuko] Download failed: could not resolve stream for {video_id}")
+                return
+            r = requests.get(stream_url, stream=True, timeout=25)
+            if r.status_code == 200:
+                tmp_path = local_path + ".tmp"
+                with open(tmp_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=128 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 10000:
+                    if os.path.exists(local_path):
+                        try: os.remove(local_path)
+                        except: pass
+                    os.rename(tmp_path, local_path)
+                    db.save_downloaded_track(data, local_path)
+                    print(f"[Etsuko] Successfully saved track offline: {data.get('title')}")
+        except Exception as e:
+            print(f"[Etsuko] Download error for {video_id}: {e}")
+
+    threading.Thread(target=do_download, daemon=True).start()
+    return {"success": True, "message": "Download initiated"}
+
+@app.route('/api/download/tracks', method=['GET'])
+def get_downloads():
+    tracks = db.get_downloaded_tracks()
+    return {"tracks": tracks}
+
+@app.route('/api/download/status/<video_id>', method=['GET'])
+def check_download_status(video_id):
+    local_path = os.path.join(DOWNLOADS_DIR, f"{video_id}.m4a")
+    downloaded = os.path.exists(local_path) and os.path.getsize(local_path) > 10000
+    if downloaded and not db.is_downloaded(video_id):
+        db.save_downloaded_track({"videoId": video_id}, local_path)
+    return {"downloaded": downloaded, "isDownloaded": downloaded}
+
+@app.route('/api/download/delete/<video_id>', method=['DELETE', 'POST', 'OPTIONS'])
+def delete_download(video_id):
+    if request.method == 'OPTIONS':
+        return {}
+    local_path = os.path.join(DOWNLOADS_DIR, f"{video_id}.m4a")
+    if os.path.exists(local_path):
+        try:
+            os.remove(local_path)
+        except Exception as e:
+            print(f"[Etsuko] File delete error: {e}")
+    db.delete_downloaded_track(video_id)
+    return {"success": True}
 
 @app.route('/api/library/like', method=['POST', 'OPTIONS'])
 def toggle_like():

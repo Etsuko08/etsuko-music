@@ -386,11 +386,11 @@
     <footer class="player-bar-floating">
       <!-- Left: Active Track Meta -->
       <div class="player-left">
-        <div class="track-cover-box" id="player-cover-box">
+        <div class="track-cover-box clickable-player-info" id="player-cover-box" title="Open Expanded Player">
           <img id="player-cover" src="assets/logo.png" alt="Cover" onerror="this.src='assets/default_cover.png'">
           <div class="cover-overlay-spinner" id="cover-spinner" style="display:none;"></div>
         </div>
-        <div class="track-meta">
+        <div class="track-meta clickable-player-info" id="player-track-meta" title="Open Expanded Player">
           <div class="track-title" id="player-title">Ready to Stream</div>
           <div class="track-artist" id="player-artist">Etsuko Studio</div>
         </div>
@@ -448,6 +448,9 @@
         </button>
         <button class="figma-control-btn" id="btn-queue-toggle" title="Queue Drawer">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+        </button>
+        <button class="figma-control-btn" id="btn-expand-player" title="Expand Full Player">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1="21" y1="3" x2="14" y2="10"></line><line x1="3" y1="21" x2="10" y2="14"></line></svg>
         </button>
         <div class="volume-container">
           <button class="figma-control-btn" id="btn-volume-icon" title="Mute">
@@ -569,11 +572,178 @@
     </div>
   </div>
 
+  <!-- Full-Screen / Expanded Music Player Overlay -->
+  <div class="expanded-player-overlay" id="expanded-player-overlay">
+    <!-- Ambient blurred background artwork -->
+    <div class="expanded-bg-art" id="expanded-bg-art"></div>
+    <div class="expanded-backdrop-overlay"></div>
+
+    <!-- Expanded Top Bar -->
+    <header class="expanded-top-bar">
+      <button class="btn-figma-icon btn-expanded-minimize" id="btn-expanded-minimize" title="Minimize Player (Esc)">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.5">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+      <div class="expanded-header-title">
+        <span class="live-dot pulse"></span>
+        <span id="expanded-header-label">NOW PLAYING</span>
+      </div>
+      <div class="expanded-top-actions">
+        <div class="expanded-tab-pills">
+          <button class="expanded-tab-pill active" data-tab="lyrics" id="tab-btn-lyrics">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
+            <span>Lyrics</span>
+          </button>
+          <button class="expanded-tab-pill" data-tab="queue" id="tab-btn-queue">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+            <span>Queue</span>
+          </button>
+          <button class="expanded-tab-pill" data-tab="recommended" id="tab-btn-recommended">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+            <span>Recommended</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Expanded Body Layout -->
+    <div class="expanded-body">
+      <!-- Left Column: Master Artwork & Main Controls -->
+      <div class="expanded-left-col">
+        <div class="expanded-cover-wrapper">
+          <img id="expanded-cover-img" src="assets/default_cover.png" alt="Album Cover" class="expanded-cover-img" onerror="this.src='assets/default_cover.png'">
+        </div>
+
+        <div class="expanded-track-meta-row">
+          <div class="expanded-meta-text">
+            <h1 class="expanded-title" id="expanded-title">Ready to Stream</h1>
+            <h2 class="expanded-artist" id="expanded-artist">Etsuko Studio</h2>
+            <p class="expanded-album" id="expanded-album">Master Audio Engine</p>
+          </div>
+          <div class="expanded-meta-actions">
+            <button class="btn-expanded-action" id="expanded-like-btn" title="Like Track">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+              </svg>
+            </button>
+            <button class="btn-expanded-action" id="expanded-download-btn" title="Download for Offline Playback">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+            </button>
+            <button class="btn-expanded-action" id="expanded-add-playlist-btn" title="Add to Playlist">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5">
+                <line x1="12" y1="5" x2="12" y2="19"></line>
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Scrubber & Timestamps -->
+        <div class="expanded-scrubber-container">
+          <div class="expanded-scrubber-bar" id="expanded-timeline-scrubber">
+            <div class="expanded-scrubber-buffered" id="expanded-scrubber-buffered"></div>
+            <div class="expanded-scrubber-fill" id="expanded-scrubber-fill">
+              <div class="expanded-scrubber-thumb"></div>
+            </div>
+          </div>
+          <div class="expanded-time-row">
+            <span id="expanded-current-time">0:00</span>
+            <span id="expanded-total-duration">0:00</span>
+          </div>
+        </div>
+
+        <!-- Master Playback Controls -->
+        <div class="expanded-controls-row">
+          <button class="expanded-control-btn" id="expanded-btn-shuffle" title="Shuffle">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>
+            <span class="control-dot" id="expanded-shuffle-dot"></span>
+          </button>
+          <button class="expanded-control-btn" id="expanded-btn-prev" title="Previous Track">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" stroke-width="2.5"></line></svg>
+          </button>
+          <button class="expanded-btn-play-pause" id="expanded-btn-play-pause" title="Play / Pause">
+            <svg id="expanded-icon-play" viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><polygon points="7 4 19 12 7 20 7 4"></polygon></svg>
+            <svg id="expanded-icon-pause" viewBox="0 0 24 24" width="28" height="28" fill="currentColor" style="display:none;"><rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect></svg>
+          </button>
+          <button class="expanded-control-btn" id="expanded-btn-next" title="Next Track">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="currentColor"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" stroke-width="2.5"></line></svg>
+          </button>
+          <button class="expanded-control-btn" id="expanded-btn-repeat" title="Repeat">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
+            <span class="repeat-badge" id="expanded-repeat-badge" style="display:none;">1</span>
+            <span class="control-dot" id="expanded-repeat-dot"></span>
+          </button>
+        </div>
+
+        <!-- Volume Subsystem in Expanded View -->
+        <div class="expanded-volume-row">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+          <div class="expanded-volume-track" id="expanded-volume-track">
+            <div class="expanded-volume-fill" id="expanded-volume-fill"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Interactive Content (Lyrics / Queue / Recommended) -->
+      <div class="expanded-right-col">
+        <!-- 1. Lyrics Panel -->
+        <div class="expanded-panel active" id="panel-lyrics">
+          <div class="panel-header">
+            <div class="panel-header-badge">
+              <span class="lyrics-mode-badge" id="expanded-lyrics-status">SYNCHRONIZED VOCALS</span>
+            </div>
+            <button class="btn-lyrics-follow" id="expanded-lyrics-follow-btn" title="Follow Current Lyric">
+              <span>● Auto-Scroll On</span>
+            </button>
+          </div>
+          <div class="expanded-lyrics-scroll-box" id="expanded-lyrics-container" dir="auto">
+            <div class="lyrics-placeholder">Select a song to display lyrics...</div>
+          </div>
+        </div>
+
+        <!-- 2. Up Next Queue Panel -->
+        <div class="expanded-panel" id="panel-queue">
+          <div class="panel-header">
+            <div class="queue-title-wrap">
+              <h3>Up Next in Queue</h3>
+              <span class="queue-count-pill" id="expanded-queue-count">0 tracks</span>
+            </div>
+            <button class="btn-figma-text btn-clear-queue-text" id="expanded-btn-clear-queue">Clear All</button>
+          </div>
+          <div class="expanded-queue-list" id="expanded-queue-list">
+            <!-- Populated dynamically with upcoming tracks -->
+          </div>
+        </div>
+
+        <!-- 3. Recommended For You Panel -->
+        <div class="expanded-panel" id="panel-recommended">
+          <div class="panel-header">
+            <div class="rec-title-wrap">
+              <h3>Recommended For You</h3>
+              <span class="rec-vibe-tag" id="expanded-rec-vibe-tag">Based on current vibe</span>
+            </div>
+            <span class="panel-badge-pill">SMART ML</span>
+          </div>
+          <div class="expanded-rec-list" id="expanded-rec-list">
+            <!-- Populated dynamically with vibe recommendations -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast Notification -->
   <div class="app-toast" id="app-toast" style="display:none;"></div>
 
   <audio id="audio-engine" preload="auto" crossorigin="anonymous" referrerpolicy="no-referrer"></audio>
+  <script src="js/api.js"></script>
   <script src="js/player.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
+

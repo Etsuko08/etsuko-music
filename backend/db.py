@@ -74,6 +74,19 @@ def init_db():
     )
     """)
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS downloaded_tracks (
+        video_id TEXT PRIMARY KEY,
+        title TEXT,
+        artist TEXT,
+        album TEXT,
+        duration TEXT,
+        thumbnail TEXT,
+        local_path TEXT,
+        downloaded_at INTEGER
+    )
+    """)
+
     # Seed default user profile if empty
     cursor.execute("SELECT id FROM user_profile WHERE id = 1")
     if not cursor.fetchone():
@@ -81,7 +94,7 @@ def init_db():
         INSERT INTO user_profile (id, name, bio, avatar)
         VALUES (1, '', '', 'assets/default_user.png')
         """)
-    
+
     conn.commit()
     conn.close()
 
@@ -314,5 +327,60 @@ def get_history(limit=50):
         "playedAt": r[6],
         "isLiked": is_liked(r[0])
     } for r in rows]
+
+def save_downloaded_track(track, local_path):
+    conn = get_connection()
+    c = conn.cursor()
+    video_id = track.get("videoId") or track.get("video_id")
+    c.execute("""
+    INSERT OR REPLACE INTO downloaded_tracks (video_id, title, artist, album, duration, thumbnail, local_path, downloaded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        video_id,
+        track.get("title", "Unknown"),
+        track.get("artist", "Unknown"),
+        track.get("album", ""),
+        track.get("duration", "0:00"),
+        track.get("thumbnail", ""),
+        local_path,
+        int(time.time())
+    ))
+    conn.commit()
+    conn.close()
+
+def get_downloaded_tracks():
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT video_id, title, artist, album, duration, thumbnail, local_path, downloaded_at FROM downloaded_tracks ORDER BY downloaded_at DESC")
+    rows = c.fetchall()
+    conn.close()
+    return [{
+        "videoId": r[0],
+        "title": r[1],
+        "artist": r[2],
+        "album": r[3],
+        "duration": r[4],
+        "thumbnail": r[5],
+        "localPath": r[6],
+        "downloadedAt": r[7],
+        "isDownloaded": True,
+        "isLiked": is_liked(r[0])
+    } for r in rows]
+
+def is_downloaded(video_id):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM downloaded_tracks WHERE video_id = ?", (video_id,))
+    row = c.fetchone()
+    conn.close()
+    return bool(row)
+
+def delete_downloaded_track(video_id):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM downloaded_tracks WHERE video_id = ?", (video_id,))
+    conn.commit()
+    conn.close()
+    return True
 
 init_db()
