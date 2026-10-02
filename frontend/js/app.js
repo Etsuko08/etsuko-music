@@ -12,6 +12,22 @@ window.showToast = function(message) {
   }, 2200);
 };
 
+// Global Resilient Thumbnail Fallback
+window.handleTrackImgError = function(img, videoId) {
+  if (!img) return;
+  const currentSrc = img.src || '';
+  if (videoId && !currentSrc.includes('hqdefault.jpg') && !currentSrc.includes('mqdefault.jpg')) {
+    img.src = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    return;
+  }
+  if (videoId && currentSrc.includes('hqdefault.jpg')) {
+    img.src = `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`;
+    return;
+  }
+  img.onerror = null;
+  img.src = 'assets/default_cover.png';
+};
+
 class EtsukoApp {
   constructor() {
     this.currentView = 'home';
@@ -816,7 +832,7 @@ class EtsukoApp {
         card.innerHTML = `
           <div class="card-img-wrapper">
             <span class="card-rank-badge ${rankClass}">#${rank}</span>
-            <img src="${track.thumbnail}" alt="${track.title}" class="${isYt ? 'yt-video-thumb' : ''}" onerror="this.onerror=null; this.src='assets/default_cover.png';" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this);" loading="lazy">
+            <img src="${track.thumbnail}" alt="${track.title}" class="${isYt ? 'yt-video-thumb' : ''}" onerror="window.handleTrackImgError(this, '${track.videoId}')" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this, '${track.videoId}');" loading="lazy">
             <button class="card-play-btn" title="Play">
               <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>
             </button>
@@ -1138,7 +1154,7 @@ class EtsukoApp {
       const top = results[0];
       this.topResultCol.style.display = 'block';
       this.topResultCard.innerHTML = `
-        <img src="${top.thumbnail}" alt="${top.title}" onerror="this.onerror=null; this.src='assets/default_cover.png';" onload="if(this.naturalWidth<=120&&this.naturalHeight<=90){this.src='assets/default_cover.png';}">
+        <img src="${top.thumbnail}" alt="${top.title}" onerror="window.handleTrackImgError(this, '${top.videoId}')" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this, '${top.videoId}');">
         <div class="top-result-title">${top.title}</div>
         <div class="top-result-meta">${top.artist} • ${top.album || 'Track'}</div>
         <div class="top-result-type">Track</div>
@@ -1182,7 +1198,7 @@ class EtsukoApp {
         <svg class="row-play-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>
       </div>
       <div class="track-row-main">
-        <img class="track-row-img" src="${track.thumbnail}" alt="${track.title}" onerror="this.onerror=null; this.src='assets/default_cover.png';" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this);" loading="lazy">
+        <img class="track-row-img" src="${track.thumbnail}" alt="${track.title}" onerror="window.handleTrackImgError(this, '${track.videoId}')" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this, '${track.videoId}');" loading="lazy">
         <div class="track-row-text">
           <div class="track-row-title">${track.title}</div>
           <div class="track-row-artist">${track.artist}</div>
@@ -1580,7 +1596,7 @@ class EtsukoApp {
       this.queueNowPlaying.innerHTML = `
         <div class="queue-now-card">
           <div class="queue-now-card-img-wrap">
-            <img src="${current.thumbnail}" alt="${current.title}" onerror="this.onerror=null; this.src='assets/default_cover.png';" loading="lazy">
+            <img src="${current.thumbnail}" alt="${current.title}" onerror="window.handleTrackImgError(this, '${current.videoId}')" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this, '${current.videoId}');" loading="lazy">
           </div>
           <div class="queue-now-card-info">
             <div class="queue-now-title" title="${current.title}">${current.title}</div>
@@ -1644,7 +1660,7 @@ class EtsukoApp {
         item.className = 'queue-track-item';
         item.innerHTML = `
           <span class="queue-item-idx">${i + 1}</span>
-          <img src="${t.thumbnail}" alt="${t.title}" onerror="this.onerror=null; this.src='assets/default_cover.png';" loading="lazy">
+          <img src="${t.thumbnail}" alt="${t.title}" onerror="window.handleTrackImgError(this, '${t.videoId}')" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this, '${t.videoId}');" loading="lazy">
           <div class="queue-track-info">
             <div class="queue-track-title" title="${t.title}">${t.title}</div>
             <div class="queue-track-artist" title="${t.artist}">${t.artist}</div>
@@ -1691,7 +1707,7 @@ class EtsukoApp {
         const item = document.createElement('div');
         item.className = 'queue-track-item';
         item.innerHTML = `
-          <img src="${t.thumbnail || 'assets/default_cover.png'}" alt="${t.title}" onerror="this.onerror=null; this.src='assets/default_cover.png';" loading="lazy">
+          <img src="${t.thumbnail || 'assets/default_cover.png'}" alt="${t.title}" onerror="window.handleTrackImgError(this, '${t.videoId}')" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this, '${t.videoId}');" loading="lazy">
           <div class="queue-track-info">
             <div class="queue-track-title" title="${t.title}">${t.title}</div>
             <div class="queue-track-artist" title="${t.artist}">${t.artist}</div>

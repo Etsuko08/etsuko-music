@@ -12,18 +12,12 @@ function formatHighResThumbnail(videoId, url) {
       }
       return url;
     }
-    if (url.includes('hq720.jpg') || url.includes('maxresdefault.jpg')) {
-      return url;
-    }
-    if (url.includes('hqdefault.jpg') && videoId) {
-      return `https://i.ytimg.com/vi/${videoId}/hq720.jpg`;
-    }
     if (url.startsWith('http')) {
       return url;
     }
   }
   if (videoId) {
-    return `https://i.ytimg.com/vi/${videoId}/hq720.jpg`;
+    return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
   }
   return url || 'assets/default_cover.png';
 }

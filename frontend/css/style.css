@@ -3527,17 +3527,9 @@ body.figma-dark {
   transform-origin: left top;
 }
 
-/* Past lines dissolve and collapse smoothly so singing line is ALWAYS at the very top */
+/* Past lines completely disappear so the singing line is ALWAYS pinned to the top */
 .expanded-lyrics-line.passed {
-  opacity: 0 !important;
-  max-height: 0 !important;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-  margin-top: 0 !important;
-  margin-bottom: 0 !important;
-  overflow: hidden !important;
-  transform: translateY(-14px) scale(0.95) !important;
-  pointer-events: none !important;
+  display: none !important;
 }
 
 /* Current singing line: dominant, top, vibrant neon gradient text with subtle glow */

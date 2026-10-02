@@ -12,6 +12,8 @@ class EtsukoPlayer {
     this.repeatMode = 0;          // 0: off, 1: all, 2: one
     this.volume = parseFloat(localStorage.getItem('etsuko_volume') || '0.75');
     this.isMuted = false;
+    this.isScrubbingVolume = false;
+    this._sysVolTimeout = null;
     this.isPlaying = false;
     this.audioContext = null;
     this.analyser = null;
@@ -130,6 +132,39 @@ class EtsukoPlayer {
     this.audio.volume = this.volume;
     this.updateVolumeUI(this.volume);
 
+    // Sync master PC system volume on launch
+    fetch('/api/system/volume')
+      .then(res => res.json())
+      .then(data => {
+        if (data && typeof data.volume === 'number') {
+          this.volume = Math.max(0, Math.min(1, data.volume));
+          this.isMuted = !!data.muted;
+          this.audio.volume = this.isMuted ? 0 : this.volume;
+          this.updateVolumeUI(this.isMuted ? 0 : this.volume);
+        }
+      })
+      .catch(() => {});
+
+    // Periodic sync with Windows master volume (every 3s when not dragging slider)
+    setInterval(() => {
+      if (this.isScrubbingVolume) return;
+      fetch('/api/system/volume')
+        .then(res => res.json())
+        .then(data => {
+          if (data && typeof data.volume === 'number') {
+            const sysVol = Math.max(0, Math.min(1, data.volume));
+            const sysMuted = !!data.muted;
+            if (Math.abs(this.volume - sysVol) > 0.02 || this.isMuted !== sysMuted) {
+              this.volume = sysVol;
+              this.isMuted = sysMuted;
+              this.audio.volume = this.isMuted ? 0 : this.volume;
+              this.updateVolumeUI(this.isMuted ? 0 : this.volume);
+            }
+          }
+        })
+        .catch(() => {});
+    }, 3000);
+
     this.audio.addEventListener('play', () => this.onPlayStateChange(true));
     this.audio.addEventListener('pause', () => this.onPlayStateChange(false));
     this.audio.addEventListener('timeupdate', () => this.onTimeUpdate());
@@ -165,7 +200,7 @@ class EtsukoPlayer {
     window.addEventListener('keydown', setupAudioContext, { once: true });
   }
 
-  fitCoverImage(img) {
+  fitCoverImage(img, videoId = null) {
     if (!img) return;
     const check = () => {
       // Auto-detect YouTube letterbox 480x360 or URL signature and apply scale
@@ -182,14 +217,16 @@ class EtsukoPlayer {
       img.onload = check;
     }
     img.onerror = () => {
-      if (img.src && img.src.includes('hq720.jpg')) {
-        const vidMatch = img.src.match(/\/vi\/([^/]+)\//);
-        if (vidMatch && vidMatch[1]) {
-          img.src = `https://i.ytimg.com/vi/${vidMatch[1]}/mqdefault.jpg`;
-          return;
-        }
+      const src = img.src || '';
+      const vid = videoId || (src.match(/\/vi\/([^/]+)\//) ? src.match(/\/vi\/([^/]+)\//)[1] : null);
+      if (vid && !src.includes('hqdefault.jpg') && !src.includes('mqdefault.jpg')) {
+        img.src = `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`;
+      } else if (vid && src.includes('hqdefault.jpg')) {
+        img.src = `https://i.ytimg.com/vi/${vid}/mqdefault.jpg`;
+      } else {
+        img.onerror = null;
+        img.src = 'assets/default_cover.png';
       }
-      img.src = 'assets/default_cover.png';
     };
   }
 
@@ -211,7 +248,7 @@ class EtsukoPlayer {
     // Volume Scrubbing on Bottom Player
     this.setupScrubber(this.volumeScrubber, (percentage) => {
       this.setVolume(percentage);
-    });
+    }, () => { this.isScrubbingVolume = true; }, () => { this.isScrubbingVolume = false; });
 
     this.btnVolumeIcon.addEventListener('click', () => this.toggleMute());
     this.playerLikeBtn.addEventListener('click', () => this.toggleLikeCurrentTrack());
@@ -309,7 +346,7 @@ class EtsukoPlayer {
     // Expanded Volume Slider
     this.setupScrubber(this.expandedVolumeTrack, (percentage) => {
       this.setVolume(percentage);
-    });
+    }, () => { this.isScrubbingVolume = true; }, () => { this.isScrubbingVolume = false; });
 
     // Right Column Tabs
     if (this.tabBtnLyrics) {
@@ -390,7 +427,7 @@ class EtsukoPlayer {
   }
 
   // --- Scrubber Helper ---
-  setupScrubber(element, callback) {
+  setupScrubber(element, callback, onStart = null, onEnd = null) {
     if (!element) return;
     let isDragging = false;
 
@@ -403,12 +440,14 @@ class EtsukoPlayer {
 
     element.addEventListener('mousedown', (e) => {
       isDragging = true;
+      if (onStart) onStart();
       handleScrub(e);
       const onMouseMove = (ev) => {
         if (isDragging) handleScrub(ev);
       };
       const onMouseUp = () => {
         isDragging = false;
+        if (onEnd) onEnd();
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
       };
@@ -418,12 +457,14 @@ class EtsukoPlayer {
 
     element.addEventListener('touchstart', (e) => {
       isDragging = true;
+      if (onStart) onStart();
       handleScrub(e);
       const onTouchMove = (ev) => {
         if (isDragging) handleScrub(ev);
       };
       const onTouchEnd = () => {
         isDragging = false;
+        if (onEnd) onEnd();
         window.removeEventListener('touchmove', onTouchMove);
         window.removeEventListener('touchend', onTouchEnd);
       };
@@ -450,6 +491,7 @@ class EtsukoPlayer {
         this.playedHistory = [];
       }
       this.currentTrack = track;
+      this.loadRecommendations(track, playToken);
     } else if (!isNavigating) {
       // User clicked a brand new seed track from Search or Home
       this.isExplicitQueue = false;
@@ -460,6 +502,7 @@ class EtsukoPlayer {
     } else {
       // Navigating (next / prev) within existing queue: preserve queue & history
       this.currentTrack = track;
+      this.loadRecommendations(track, playToken);
     }
 
     // Update Bottom & Expanded Metas
@@ -515,13 +558,14 @@ class EtsukoPlayer {
 
     window.dispatchEvent(new CustomEvent('etsuko:track-started', { detail: track }));
     this.renderQueueUI();
+    this.prefetchUpcoming();
   }
 
   updateTrackMetaUI(track) {
     const thumb = track.thumbnail || 'assets/default_cover.png';
     if (this.playerCover) {
       this.playerCover.src = thumb;
-      this.fitCoverImage(this.playerCover);
+      this.fitCoverImage(this.playerCover, track.videoId);
     }
     if (this.playerTitle) this.playerTitle.textContent = track.title || 'Unknown Title';
     if (this.playerArtist) this.playerArtist.textContent = track.artist || 'Unknown Artist';
@@ -538,7 +582,7 @@ class EtsukoPlayer {
     }
     if (this.expandedCoverImg) {
       this.expandedCoverImg.src = thumb;
-      this.fitCoverImage(this.expandedCoverImg);
+      this.fitCoverImage(this.expandedCoverImg, track.videoId);
     }
     if (this.expandedTitle) this.expandedTitle.textContent = track.title || 'Unknown Title';
     if (this.expandedArtist) this.expandedArtist.textContent = track.artist || 'Unknown Artist';
@@ -623,6 +667,7 @@ class EtsukoPlayer {
 
       this.renderRecommendationsUI();
       this.renderQueueUI();
+      this.prefetchUpcoming();
     } catch (e) {
       console.warn('[Player] loadRecommendations error:', e);
     } finally {
@@ -645,6 +690,7 @@ class EtsukoPlayer {
         this.queue.push(...candidates);
         this.renderQueueUI();
         this.renderRecommendationsUI();
+        this.prefetchUpcoming();
 
         if (playImmediately && (!this.currentTrack || this.audio.paused)) {
           this.next();
@@ -762,10 +808,7 @@ class EtsukoPlayer {
 
       // Keep singing line pinned right at the top
       if (this.autoScrollLyrics && this.expandedOverlay && this.expandedOverlay.classList.contains('open')) {
-        this.expandedLyricsContainer.scrollTo({
-          top: 0,
-          behavior: 'smooth'
-        });
+        this.expandedLyricsContainer.scrollTop = 0;
       }
     }
   }
@@ -803,7 +846,7 @@ class EtsukoPlayer {
           `;
 
           const img = card.querySelector('img');
-          this.fitCoverImage(img);
+          this.fitCoverImage(img, t.videoId);
 
           card.onclick = (e) => {
             if (e.target.closest('.btn-card-remove')) return;
@@ -836,10 +879,23 @@ class EtsukoPlayer {
   renderRecommendationsUI() {
     if (!this.expandedRecList) return;
     this.expandedRecList.innerHTML = '';
-    const recs = (this.recommendedPool || []).filter(t =>
+    let recs = (this.recommendedPool || []).filter(t =>
       t.videoId !== (this.currentTrack ? this.currentTrack.videoId : '') &&
       !this.queue.some(q => q.videoId === t.videoId)
     );
+
+    if (recs.length === 0) {
+      if (this.currentTrack && !this.isFetchingRecommendations) {
+        this.loadRecommendations(this.currentTrack);
+      }
+      const fallbackList = (window.app && window.app.homeTrending && window.app.homeTrending.length > 0)
+        ? window.app.homeTrending
+        : (typeof CATALOG_TRENDING_HITS !== 'undefined' ? CATALOG_TRENDING_HITS : []);
+      recs = fallbackList.filter(t =>
+        t.videoId !== (this.currentTrack ? this.currentTrack.videoId : '') &&
+        !this.queue.some(q => q.videoId === t.videoId)
+      ).slice(0, 10);
+    }
 
     if (recs.length === 0) {
       this.expandedRecList.innerHTML = '<div style="color:var(--text-muted); font-size:13px; text-align:center; padding:32px;">Generating vibe recommendations...</div>';
@@ -868,7 +924,7 @@ class EtsukoPlayer {
       `;
 
       const img = card.querySelector('img');
-      this.fitCoverImage(img);
+      this.fitCoverImage(img, t.videoId);
 
       card.onclick = () => {
         if (this.currentTrack) this.playedHistory.push(this.currentTrack);
@@ -997,12 +1053,29 @@ class EtsukoPlayer {
     if (window.showToast) window.showToast(states[this.repeatMode]);
   }
 
-  setVolume(pct) {
+  prefetchUpcoming() {
+    if (this.queue && this.queue.length > 0 && this.queue[0]?.videoId) {
+      fetch(`/api/prefetch_stream/${encodeURIComponent(this.queue[0].videoId)}`).catch(() => {});
+    }
+  }
+
+  setVolume(pct, syncMaster = true) {
     this.volume = Math.max(0, Math.min(1, pct));
     this.isMuted = this.volume === 0;
     this.audio.volume = this.volume;
     localStorage.setItem('etsuko_volume', this.volume.toFixed(2));
     this.updateVolumeUI(this.volume);
+
+    if (syncMaster) {
+      clearTimeout(this._sysVolTimeout);
+      this._sysVolTimeout = setTimeout(() => {
+        fetch('/api/system/volume', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ volume: this.volume, muted: this.isMuted })
+        }).catch(() => {});
+      }, 50);
+    }
   }
 
   toggleMute() {
@@ -1010,9 +1083,9 @@ class EtsukoPlayer {
       this.isMuted = false;
       this.setVolume(this.prevVolume || 0.75);
     } else {
-      this.prevVolume = this.volume;
-      this.setVolume(0);
+      this.prevVolume = this.volume > 0 ? this.volume : 0.75;
       this.isMuted = true;
+      this.setVolume(0);
     }
   }
 

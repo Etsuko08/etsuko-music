@@ -106,12 +106,15 @@ def resolve_audio_stream(video_id, force=False):
 
 def clean_thumbnail(thumbnails, video_id=None):
     if not thumbnails:
-        return f"https://i.ytimg.com/vi/{video_id}/hq720.jpg" if video_id else "assets/default_cover.png"
+        return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else "assets/default_cover.png"
     url = thumbnails[-1]['url']
     if "=" in url:
         url = url.split("=")[0] + "=w544-h544-l90-rj"
-    elif "hqdefault.jpg" in url and video_id:
-        url = f"https://i.ytimg.com/vi/{video_id}/hq720.jpg"
+    elif "hq720.jpg" in url:
+        if video_id:
+            url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+        else:
+            url = url.replace("hq720.jpg", "hqdefault.jpg")
     return url
 
 # Verified high-res 1:1 square hits for zero-delay startup with zero letterboxing
@@ -237,13 +240,15 @@ def search_tracks():
                     if dur_secs > 900 or dur_secs < 20:
                         continue
                     m, s = divmod(dur_secs, 60)
+                    thumbs = entry.get('thumbnails', [])
+                    thumb_url = clean_thumbnail(thumbs, vid)
                     results.append({
                         "videoId": vid,
                         "title": entry.get('title', 'Unknown Title'),
                         "artist": entry.get('uploader', 'Unknown Artist'),
                         "album": "",
                         "duration": f"{m}:{s:02d}",
-                        "thumbnail": f"https://i.ytimg.com/vi/{vid}/hq720.jpg",
+                        "thumbnail": thumb_url,
                         "isLiked": db.is_liked(vid)
                     })
         except Exception as e:
@@ -606,6 +611,99 @@ def delete_download(video_id):
             print(f"[Etsuko] File delete error: {e}")
     db.delete_downloaded_track(video_id)
     return {"success": True}
+
+# --- Background Stream Prefetcher ---
+@app.route('/api/prefetch_stream/<video_id>', method=['GET', 'OPTIONS'])
+def prefetch_audio_stream(video_id):
+    if request.method == 'OPTIONS':
+        return {}
+    def _worker():
+        try:
+            resolve_audio_stream(video_id)
+        except Exception:
+            pass
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"status": "prefetching"}
+
+# --- Native Windows System Master Volume Synchronization ---
+def get_windows_system_volume():
+    try:
+        import ctypes
+        from ctypes import wintypes, POINTER, Structure, c_void_p, c_float, byref, cast
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitialize(None)
+        class GUID(Structure):
+            _fields_ = [('Data1', wintypes.DWORD), ('Data2', wintypes.WORD), ('Data3', wintypes.WORD), ('Data4', wintypes.BYTE * 8)]
+        CLSID_MMDevEnum = GUID(0xBCDE0395, 0xE52F, 0x467C, (wintypes.BYTE * 8)(0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E))
+        IID_IMMDevEnum = GUID(0xA95664D2, 0x9614, 0x4F35, (wintypes.BYTE * 8)(0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6))
+        IID_IAudioEndpointVolume = GUID(0x5CDF2C82, 0x841E, 0x4546, (wintypes.BYTE * 8)(0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A))
+
+        enum_ptr = c_void_p()
+        ole32.CoCreateInstance(byref(CLSID_MMDevEnum), None, 1, byref(IID_IMMDevEnum), byref(enum_ptr))
+        vtable = cast(cast(enum_ptr, POINTER(c_void_p)).contents, POINTER(c_void_p))
+        GetDefaultAudioEndpoint = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, wintypes.DWORD, wintypes.DWORD, POINTER(c_void_p))(vtable[4])
+        dev_ptr = c_void_p()
+        GetDefaultAudioEndpoint(enum_ptr, 0, 0, byref(dev_ptr))
+        dev_vtable = cast(cast(dev_ptr, POINTER(c_void_p)).contents, POINTER(c_void_p))
+        Activate = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, POINTER(GUID), wintypes.DWORD, c_void_p, POINTER(c_void_p))(dev_vtable[3])
+        vol_ptr = c_void_p()
+        Activate(dev_ptr, byref(IID_IAudioEndpointVolume), 1, None, byref(vol_ptr))
+        vol_vtable = cast(cast(vol_ptr, POINTER(c_void_p)).contents, POINTER(c_void_p))
+        GetMasterVolumeLevelScalar = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, POINTER(c_float))(vol_vtable[9])
+        GetMute = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, POINTER(wintypes.BOOL))(vol_vtable[14])
+        vol = c_float()
+        mute = wintypes.BOOL()
+        GetMasterVolumeLevelScalar(vol_ptr, byref(vol))
+        GetMute(vol_ptr, byref(mute))
+        return {"volume": float(vol.value), "muted": bool(mute.value)}
+    except Exception as e:
+        return {"volume": 0.75, "muted": False}
+
+def set_windows_system_volume(vol_scalar=None, mute=None):
+    try:
+        import ctypes
+        from ctypes import wintypes, POINTER, Structure, c_void_p, c_float, byref, cast
+        ole32 = ctypes.windll.ole32
+        ole32.CoInitialize(None)
+        class GUID(Structure):
+            _fields_ = [('Data1', wintypes.DWORD), ('Data2', wintypes.WORD), ('Data3', wintypes.WORD), ('Data4', wintypes.BYTE * 8)]
+        CLSID_MMDevEnum = GUID(0xBCDE0395, 0xE52F, 0x467C, (wintypes.BYTE * 8)(0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E))
+        IID_IMMDevEnum = GUID(0xA95664D2, 0x9614, 0x4F35, (wintypes.BYTE * 8)(0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6))
+        IID_IAudioEndpointVolume = GUID(0x5CDF2C82, 0x841E, 0x4546, (wintypes.BYTE * 8)(0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A))
+
+        enum_ptr = c_void_p()
+        ole32.CoCreateInstance(byref(CLSID_MMDevEnum), None, 1, byref(IID_IMMDevEnum), byref(enum_ptr))
+        vtable = cast(cast(enum_ptr, POINTER(c_void_p)).contents, POINTER(c_void_p))
+        GetDefaultAudioEndpoint = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, wintypes.DWORD, wintypes.DWORD, POINTER(c_void_p))(vtable[4])
+        dev_ptr = c_void_p()
+        GetDefaultAudioEndpoint(enum_ptr, 0, 0, byref(dev_ptr))
+        dev_vtable = cast(cast(dev_ptr, POINTER(c_void_p)).contents, POINTER(c_void_p))
+        Activate = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, POINTER(GUID), wintypes.DWORD, c_void_p, POINTER(c_void_p))(dev_vtable[3])
+        vol_ptr = c_void_p()
+        Activate(dev_ptr, byref(IID_IAudioEndpointVolume), 1, None, byref(vol_ptr))
+        vol_vtable = cast(cast(vol_ptr, POINTER(c_void_p)).contents, POINTER(c_void_p))
+
+        if vol_scalar is not None:
+            SetMasterVolumeLevelScalar = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, c_float, c_void_p)(vol_vtable[7])
+            SetMasterVolumeLevelScalar(vol_ptr, c_float(max(0.0, min(1.0, float(vol_scalar)))), None)
+        if mute is not None:
+            SetMute = ctypes.WINFUNCTYPE(ctypes.c_long, c_void_p, wintypes.BOOL, c_void_p)(vol_vtable[13])
+            SetMute(vol_ptr, wintypes.BOOL(bool(mute)), None)
+        return True
+    except Exception as e:
+        return False
+
+@app.route('/api/system/volume', method=['GET', 'POST', 'OPTIONS'])
+def system_volume_endpoint():
+    if request.method == 'OPTIONS':
+        return {}
+    if request.method == 'POST':
+        data = request.json or {}
+        vol = data.get('volume')
+        muted = data.get('muted')
+        set_windows_system_volume(vol, muted)
+        return {"success": True}
+    return get_windows_system_volume()
 
 @app.route('/api/library/like', method=['POST', 'OPTIONS'])
 def toggle_like():
