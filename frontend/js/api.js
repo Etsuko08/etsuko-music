@@ -12,15 +12,18 @@ function formatHighResThumbnail(videoId, url) {
       }
       return url;
     }
+    if (url.includes('hq720.jpg') || url.includes('maxresdefault.jpg')) {
+      return url;
+    }
+    if (url.includes('hqdefault.jpg') && videoId) {
+      return `https://i.ytimg.com/vi/${videoId}/hq720.jpg`;
+    }
     if (url.startsWith('http')) {
-      if (url.includes('hq720.jpg')) {
-        return videoId ? `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` : url;
-      }
       return url;
     }
   }
   if (videoId) {
-    return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+    return `https://i.ytimg.com/vi/${videoId}/hq720.jpg`;
   }
   return url || 'assets/default_cover.png';
 }
@@ -457,53 +460,6 @@ class EtsukoAPI {
     return { results: filtered };
   }
 
-  // --- Offline Downloads Client API ---
-  async downloadTrack(track) {
-    try {
-      const res = await fetch('/api/download/track', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(track)
-      });
-      return await res.json();
-    } catch (e) {
-      console.error('[API] Download track request failed:', e);
-      return { success: false, error: e.message };
-    }
-  }
-
-  async getDownloadedTracks() {
-    try {
-      const res = await fetch('/api/download/tracks');
-      if (res.ok) {
-        const data = await res.json();
-        return data.tracks || [];
-      }
-    } catch (e) {
-      console.warn('[API] Get downloaded tracks error:', e);
-    }
-    return [];
-  }
-
-  async checkDownloadStatus(videoId) {
-    try {
-      const res = await fetch(`/api/download/status/${encodeURIComponent(videoId)}`);
-      if (res.ok) {
-        const data = await res.json();
-        return !!data.downloaded;
-      }
-    } catch (e) {}
-    return false;
-  }
-
-  async deleteDownload(videoId) {
-    try {
-      const res = await fetch(`/api/download/delete/${encodeURIComponent(videoId)}`, { method: 'POST' });
-      return res.ok;
-    } catch (e) {
-      return false;
-    }
-  }
 }
 
 // Global API Singleton

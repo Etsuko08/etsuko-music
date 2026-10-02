@@ -816,7 +816,7 @@ class EtsukoApp {
         card.innerHTML = `
           <div class="card-img-wrapper">
             <span class="card-rank-badge ${rankClass}">#${rank}</span>
-            <img src="${track.thumbnail}" alt="${track.title}" class="${isYt ? 'yt-video-thumb' : ''}" onerror="this.onerror=null; this.src='assets/default_cover.png';" onload="if(this.naturalWidth<=120&&this.naturalHeight<=90){this.src='assets/default_cover.png';}" loading="lazy">
+            <img src="${track.thumbnail}" alt="${track.title}" class="${isYt ? 'yt-video-thumb' : ''}" onerror="this.onerror=null; this.src='assets/default_cover.png';" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this);" loading="lazy">
             <button class="card-play-btn" title="Play">
               <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>
             </button>
@@ -1182,7 +1182,7 @@ class EtsukoApp {
         <svg class="row-play-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>
       </div>
       <div class="track-row-main">
-        <img class="track-row-img" src="${track.thumbnail}" alt="${track.title}" onerror="this.onerror=null; this.src='assets/default_cover.png';" onload="if(this.naturalWidth<=120&&this.naturalHeight<=90){this.src='assets/default_cover.png';}" loading="lazy">
+        <img class="track-row-img" src="${track.thumbnail}" alt="${track.title}" onerror="this.onerror=null; this.src='assets/default_cover.png';" onload="if(window.player&&window.player.fitCoverImage)window.player.fitCoverImage(this);" loading="lazy">
         <div class="track-row-text">
           <div class="track-row-title">${track.title}</div>
           <div class="track-row-artist">${track.artist}</div>
@@ -1394,46 +1394,11 @@ class EtsukoApp {
         };
       }
 
-      // Downloaded offline tracks shortcut card
-      let dlCard = document.querySelector('.library-card[data-playlist="downloaded"]');
-      if (!dlCard && likedCard) {
-        dlCard = document.createElement('div');
-        dlCard.className = 'library-card';
-        dlCard.setAttribute('data-playlist', 'downloaded');
-        dlCard.innerHTML = `
-          <div class="liked-heart-box" style="background: linear-gradient(135deg, #10b981, #059669);">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="white" stroke-width="2.5">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="7 10 12 15 17 10"></polyline>
-              <line x1="12" y1="15" x2="12" y2="3"></line>
-            </svg>
-          </div>
-          <div class="library-card-info">
-            <div class="library-card-title">Downloaded</div>
-            <div class="library-card-sub" id="downloaded-count-badge">0 tracks offline</div>
-          </div>
-        `;
-        likedCard.after(dlCard);
-      }
-
-      if (dlCard) {
-        try {
-          const dlRes = await fetch('/api/download/tracks');
-          const dlData = await dlRes.json();
-          const dlCount = (dlData.tracks || []).length;
-          const dlBadge = document.getElementById('downloaded-count-badge');
-          if (dlBadge) dlBadge.textContent = `${dlCount} tracks offline`;
-          dlCard.onclick = () => {
-            this.openPlaylistView(null, 'Downloaded Tracks', 'Saved locally for offline playback', dlData.tracks || []);
-          };
-        } catch (e) {}
-      }
-
       // User Playlists
       const plRes = await fetch('/api/library/playlists');
       const plData = await plRes.json();
       
-      const customElements = this.libraryPlaylists.querySelectorAll('.library-card:not([data-playlist="liked"]):not([data-playlist="downloaded"])');
+      const customElements = this.libraryPlaylists.querySelectorAll('.library-card:not([data-playlist="liked"])');
       customElements.forEach(el => el.remove());
 
       (plData.playlists || []).forEach(pl => {

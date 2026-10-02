@@ -1,14 +1,15 @@
+// Etsuko PC Neural Audio Engine & Unified Player
+// Intelligent Queue, Synced Dissolve Lyrics, Zero Letterbox Artwork & True Fullscreen Experience
+
 class EtsukoPlayer {
   constructor() {
     this.audio = document.getElementById('audio-engine');
     this.currentTrack = null;
-    this.queue = [];
-    this.queueIndex = -1;
-    this.recommendedTracks = [];
-    this.playedTrackHistory = new Set();
-    this.isExplicitQueue = false;
+    this.queue = [];              // Upcoming tracks
+    this.playedHistory = [];       // Previously played tracks for back/prev
+    this.isExplicitQueue = false;  // Whether playing a fixed playlist/album
     this.isShuffle = false;
-    this.repeatMode = 0; // 0: off, 1: all, 2: one
+    this.repeatMode = 0;          // 0: off, 1: all, 2: one
     this.volume = parseFloat(localStorage.getItem('etsuko_volume') || '0.75');
     this.isMuted = false;
     this.isPlaying = false;
@@ -21,8 +22,10 @@ class EtsukoPlayer {
     this.activeLyricIndex = -1;
     this.autoScrollLyrics = true;
 
-    // Downloaded status cache
-    this.downloadedVideoIds = new Set();
+    // Request Tokens & Concurrency Guards
+    this.currentPlayToken = 0;
+    this.isFetchingRecommendations = false;
+    this.consecutiveFailures = 0;
 
     this.initElements();
     this.initExpandedElements();
@@ -30,7 +33,6 @@ class EtsukoPlayer {
     this.initListeners();
     this.initExpandedListeners();
     this.initMediaSession();
-    this.loadDownloadedTracksCache();
   }
 
   initElements() {
@@ -82,7 +84,6 @@ class EtsukoPlayer {
     this.expandedArtist = document.getElementById('expanded-artist');
     this.expandedAlbum = document.getElementById('expanded-album');
     this.expandedLikeBtn = document.getElementById('expanded-like-btn');
-    this.expandedDownloadBtn = document.getElementById('expanded-download-btn');
     this.expandedAddPlaylistBtn = document.getElementById('expanded-add-playlist-btn');
 
     this.expandedTimelineScrubber = document.getElementById('expanded-timeline-scrubber');
@@ -125,131 +126,71 @@ class EtsukoPlayer {
     this.expandedRecVibeTag = document.getElementById('expanded-rec-vibe-tag');
   }
 
-  async loadDownloadedTracksCache() {
-    if (window.api && typeof window.api.getDownloadedTracks === 'function') {
-      try {
-        const list = await window.api.getDownloadedTracks();
-        this.downloadedVideoIds = new Set(list.map(t => t.videoId));
-        this.updateDownloadButtonState();
-      } catch (e) {}
-    }
-  }
-
   initAudio() {
     this.audio.volume = this.volume;
     this.updateVolumeUI(this.volume);
 
-    this.audio.addEventListener('timeupdate', () => this.onTimeUpdate());
-    this.audio.addEventListener('progress', () => this.onProgress());
-    this.audio.addEventListener('ended', () => this.onEnded());
     this.audio.addEventListener('play', () => this.onPlayStateChange(true));
     this.audio.addEventListener('pause', () => this.onPlayStateChange(false));
+    this.audio.addEventListener('timeupdate', () => this.onTimeUpdate());
+    this.audio.addEventListener('ended', () => this.onEnded());
     this.audio.addEventListener('waiting', () => this.showSpinner(true));
-    this.consecutiveFailures = 0;
-    this.failureSkipTimer = null;
-    this.userPaused = false;
+    this.audio.addEventListener('playing', () => this.showSpinner(false));
+    this.audio.addEventListener('canplay', () => this.showSpinner(false));
+    this.audio.addEventListener('progress', () => this.updateBufferProgress());
+    this.audio.addEventListener('error', (e) => this.handleAudioError(e));
 
-    this.audio.addEventListener('playing', () => {
-      this.showSpinner(false);
-      this.consecutiveFailures = 0;
-      if (this.failureSkipTimer) {
-        clearTimeout(this.failureSkipTimer);
-        this.failureSkipTimer = null;
-      }
-      this.initVisualizer();
-    });
-
-    this.audio.addEventListener('stalled', () => {
-      if (this.isPlaying && this.audio.paused && !this.userPaused) {
-        this.audio.play().catch(() => {});
-      }
-    });
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
-        if (this.isPlaying && this.audio.paused && !this.userPaused) {
-          this.audio.play().catch(() => {});
+    // Web Audio Visualizer API Setup
+    const setupAudioContext = () => {
+      if (!this.audioContext) {
+        try {
+          const AudioContext = window.AudioContext || window.webkitAudioContext;
+          this.audioContext = new AudioContext();
+          this.analyser = this.audioContext.createAnalyser();
+          this.analyser.fftSize = 64;
+          const source = this.audioContext.createMediaElementSource(this.audio);
+          source.connect(this.analyser);
+          this.analyser.connect(this.audioContext.destination);
+          this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+          this.renderVisualizer();
+        } catch (e) {
+          console.warn('[Etsuko] Web Audio visualizer not available:', e);
         }
       }
-    });
-
-    this.audio.addEventListener('error', (e) => {
-      console.warn('[Etsuko] Audio error:', e);
-      this.showSpinner(false);
-      this.handlePlaybackFailure();
-    });
-
-    window.addEventListener('etsuko:track-like-changed', (e) => {
-      const { videoId, isLiked } = e.detail || {};
-      if (this.currentTrack && this.currentTrack.videoId === videoId) {
-        this.currentTrack.isLiked = isLiked;
-        this.updateLikeButtonState(isLiked);
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        this.audioContext.resume();
       }
-    });
+    };
+    window.addEventListener('click', setupAudioContext, { once: true });
+    window.addEventListener('keydown', setupAudioContext, { once: true });
   }
 
-  initVisualizer() {
-    if (this.audioContext || !this.canvasVisualizer) return;
-    try {
-      const AudioContext = window.AudioContext || window.webkitAudioContext;
-      this.audioContext = new AudioContext();
-      const source = this.audioContext.createMediaElementSource(this.audio);
-      this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 64;
-      source.connect(this.analyser);
-      this.analyser.connect(this.audioContext.destination);
-
-      const bufferLength = this.analyser.frequencyBinCount;
-      this.dataArray = new Uint8Array(bufferLength);
-      this.drawVisualizer();
-    } catch (e) {
-      console.log('[Etsuko] Visualizer skipped:', e);
-    }
-  }
-
-  drawVisualizer() {
-    requestAnimationFrame(() => this.drawVisualizer());
-    if (!this.analyser || !this.isPlaying || !this.canvasVisualizer) {
-      if (this.canvasCtx && this.canvasVisualizer) {
-        this.canvasCtx.clearRect(0, 0, this.canvasVisualizer.width, this.canvasVisualizer.height);
+  fitCoverImage(img) {
+    if (!img) return;
+    const check = () => {
+      // Auto-detect YouTube letterbox 480x360 or URL signature and apply scale
+      if ((img.naturalWidth === 480 && img.naturalHeight === 360) ||
+          (img.src && img.src.includes('hqdefault.jpg'))) {
+        img.classList.add('crop-letterbox');
+      } else {
+        img.classList.remove('crop-letterbox');
       }
-      return;
+    };
+    if (img.complete && img.naturalWidth > 0) {
+      check();
+    } else {
+      img.onload = check;
     }
-    this.analyser.getByteFrequencyData(this.dataArray);
-    this.canvasCtx.clearRect(0, 0, this.canvasVisualizer.width, this.canvasVisualizer.height);
-
-    const barWidth = 3;
-    const gap = 2;
-    let x = 0;
-    const barCount = 14;
-
-    for (let i = 0; i < barCount; i++) {
-      const value = this.dataArray[i * 2] || 0;
-      const percent = value / 255;
-      const barHeight = Math.max(2, percent * this.canvasVisualizer.height);
-      const y = this.canvasVisualizer.height - barHeight;
-
-      const grad = this.canvasCtx.createLinearGradient(0, y, 0, this.canvasVisualizer.height);
-      grad.addColorStop(0, '#00f0ff');
-      grad.addColorStop(1, '#8b5cf6');
-      this.canvasCtx.fillStyle = grad;
-      this.canvasCtx.fillRect(x, y, barWidth, barHeight);
-      x += barWidth + gap;
-    }
-  }
-
-  initMediaSession() {
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.setActionHandler('play', () => this.togglePlay());
-      navigator.mediaSession.setActionHandler('pause', () => this.togglePlay());
-      navigator.mediaSession.setActionHandler('previoustrack', () => this.prev());
-      navigator.mediaSession.setActionHandler('nexttrack', () => this.next());
-      navigator.mediaSession.setActionHandler('seekto', (details) => {
-        if (details.seekTime && this.audio.duration) {
-          this.audio.currentTime = details.seekTime;
+    img.onerror = () => {
+      if (img.src && img.src.includes('hq720.jpg')) {
+        const vidMatch = img.src.match(/\/vi\/([^/]+)\//);
+        if (vidMatch && vidMatch[1]) {
+          img.src = `https://i.ytimg.com/vi/${vidMatch[1]}/mqdefault.jpg`;
+          return;
         }
-      });
-    }
+      }
+      img.src = 'assets/default_cover.png';
+    };
   }
 
   initListeners() {
@@ -273,8 +214,6 @@ class EtsukoPlayer {
     });
 
     this.btnVolumeIcon.addEventListener('click', () => this.toggleMute());
-
-    // Like button toggle on bottom player
     this.playerLikeBtn.addEventListener('click', () => this.toggleLikeCurrentTrack());
 
     // Add to playlist button
@@ -351,9 +290,7 @@ class EtsukoPlayer {
     if (this.expandedLikeBtn) {
       this.expandedLikeBtn.addEventListener('click', () => this.toggleLikeCurrentTrack());
     }
-    if (this.expandedDownloadBtn) {
-      this.expandedDownloadBtn.addEventListener('click', () => this.downloadCurrentTrack());
-    }
+
     if (this.expandedAddPlaylistBtn) {
       this.expandedAddPlaylistBtn.addEventListener('click', () => {
         if (this.currentTrack && window.app && window.app.openAddToPlaylistModal) {
@@ -362,191 +299,167 @@ class EtsukoPlayer {
       });
     }
 
-    // Scrubber in expanded player
-    if (this.expandedTimelineScrubber) {
-      this.setupScrubber(this.expandedTimelineScrubber, (percentage) => {
-        if (this.audio.duration) {
-          this.audio.currentTime = percentage * this.audio.duration;
-        }
-      });
-    }
-
-    // Volume in expanded player
-    if (this.expandedVolumeTrack) {
-      this.setupScrubber(this.expandedVolumeTrack, (percentage) => {
-        this.setVolume(percentage);
-      });
-    }
-
-    // Tabs switching
-    const tabs = [
-      { btn: this.tabBtnLyrics, panel: this.panelLyrics, id: 'lyrics' },
-      { btn: this.tabBtnQueue, panel: this.panelQueue, id: 'queue' },
-      { btn: this.tabBtnRecommended, panel: this.panelRecommended, id: 'recommended' }
-    ];
-
-    tabs.forEach(t => {
-      if (t.btn && t.panel) {
-        t.btn.addEventListener('click', () => {
-          tabs.forEach(other => {
-            if (other.btn) other.btn.classList.remove('active');
-            if (other.panel) other.panel.classList.remove('active');
-          });
-          t.btn.classList.add('active');
-          t.panel.classList.add('active');
-        });
+    // Expanded Timeline Scrubber
+    this.setupScrubber(this.expandedTimelineScrubber, (percentage) => {
+      if (this.audio.duration) {
+        this.audio.currentTime = percentage * this.audio.duration;
       }
     });
 
-    // Follow lyrics auto-scroll button
+    // Expanded Volume Slider
+    this.setupScrubber(this.expandedVolumeTrack, (percentage) => {
+      this.setVolume(percentage);
+    });
+
+    // Right Column Tabs
+    if (this.tabBtnLyrics) {
+      this.tabBtnLyrics.addEventListener('click', () => this.switchExpandedTab('lyrics'));
+    }
+    if (this.tabBtnQueue) {
+      this.tabBtnQueue.addEventListener('click', () => this.switchExpandedTab('queue'));
+    }
+    if (this.tabBtnRecommended) {
+      this.tabBtnRecommended.addEventListener('click', () => this.switchExpandedTab('recommended'));
+    }
+
+    // Auto-Scroll Toggle for Lyrics
     if (this.expandedLyricsFollowBtn) {
       this.expandedLyricsFollowBtn.addEventListener('click', () => {
         this.autoScrollLyrics = !this.autoScrollLyrics;
         this.expandedLyricsFollowBtn.classList.toggle('active', this.autoScrollLyrics);
-        this.expandedLyricsFollowBtn.innerHTML = this.autoScrollLyrics ? '<span>● Auto-Scroll On</span>' : '<span>○ Manual</span>';
-        if (this.autoScrollLyrics) this.syncLyricsScroll();
+        this.expandedLyricsFollowBtn.textContent = this.autoScrollLyrics ? '• Auto-Scroll On' : 'Auto-Scroll Off';
+        if (this.autoScrollLyrics) this.syncLyricsScroll(true);
       });
     }
 
-    // Clear queue button in expanded player
+    // Clear Upcoming Queue
     if (this.expandedBtnClearQueue) {
-      this.expandedBtnClearQueue.addEventListener('click', () => {
-        this.clearUpcomingQueue();
+      this.expandedBtnClearQueue.addEventListener('click', () => this.clearUpcomingQueue());
+    }
+  }
+
+  initMediaSession() {
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.setActionHandler('play', () => this.togglePlay());
+      navigator.mediaSession.setActionHandler('pause', () => this.togglePlay());
+      navigator.mediaSession.setActionHandler('previoustrack', () => this.prev());
+      navigator.mediaSession.setActionHandler('nexttrack', () => this.next());
+      navigator.mediaSession.setActionHandler('seekto', (details) => {
+        if (details.seekTime && this.audio.duration) {
+          this.audio.currentTime = details.seekTime;
+        }
       });
     }
   }
 
-  setupScrubber(element, callback) {
-    if (!element) return;
-    let isDragging = false;
-    const compute = (e) => {
-      const rect = element.getBoundingClientRect();
-      const clickX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-      const percentage = clickX / rect.width;
-      callback(percentage);
-    };
-
-    element.addEventListener('mousedown', (e) => {
-      isDragging = true;
-      compute(e);
-    });
-    window.addEventListener('mousemove', (e) => {
-      if (isDragging) compute(e);
-    });
-    window.addEventListener('mouseup', () => {
-      isDragging = false;
-    });
-  }
-
+  // --- Expanded Player Modal Navigation ---
   openExpandedPlayer() {
     if (!this.expandedOverlay) return;
     this.expandedOverlay.classList.add('open');
+    document.body.style.overflow = 'hidden';
     this.updateExpandedTrackMeta();
-    this.syncLyricsScroll();
+    this.syncLyricsScroll(true);
     this.renderQueueUI();
-    this.renderRecommendationsUI();
   }
 
   closeExpandedPlayer() {
     if (!this.expandedOverlay) return;
     this.expandedOverlay.classList.remove('open');
+    document.body.style.overflow = '';
   }
 
-  toggleShuffle() {
-    this.isShuffle = !this.isShuffle;
-    if (this.btnShuffle) {
-      this.btnShuffle.classList.toggle('active', this.isShuffle);
-      this.btnShuffle.title = this.isShuffle ? 'Shuffle: On' : 'Shuffle: Off';
-    }
-    if (this.expandedBtnShuffle) {
-      this.expandedBtnShuffle.classList.toggle('active', this.isShuffle);
-      this.expandedBtnShuffle.title = this.isShuffle ? 'Shuffle: On' : 'Shuffle: Off';
-    }
-    if (window.showToast) {
-      window.showToast(this.isShuffle ? '🔀 Shuffle On' : '➡️ Shuffle Off');
-    }
-  }
+  switchExpandedTab(tabName) {
+    const tabs = [
+      { name: 'lyrics', btn: this.tabBtnLyrics, panel: this.panelLyrics },
+      { name: 'queue', btn: this.tabBtnQueue, panel: this.panelQueue },
+      { name: 'recommended', btn: this.tabBtnRecommended, panel: this.panelRecommended }
+    ];
 
-  cycleRepeat() {
-    this.repeatMode = (this.repeatMode + 1) % 3;
-    const isOff = this.repeatMode === 0;
-    const isAll = this.repeatMode === 1;
-    const isOne = this.repeatMode === 2;
+    tabs.forEach(t => {
+      if (t.btn) t.btn.classList.toggle('active', t.name === tabName);
+      if (t.panel) t.panel.classList.toggle('active', t.name === tabName);
+    });
 
-    if (this.btnRepeat) {
-      this.btnRepeat.classList.toggle('active', !isOff);
-      if (this.repeatBadge) this.repeatBadge.style.display = isOne ? 'flex' : 'none';
-      this.btnRepeat.title = isOff ? 'Repeat: Off' : (isAll ? 'Repeat: All' : 'Repeat: One');
-    }
-
-    if (this.expandedBtnRepeat) {
-      this.expandedBtnRepeat.classList.toggle('active', !isOff);
-      if (this.expandedRepeatBadge) this.expandedRepeatBadge.style.display = isOne ? 'flex' : 'none';
-      this.expandedBtnRepeat.title = isOff ? 'Repeat: Off' : (isAll ? 'Repeat: All' : 'Repeat: One');
-    }
-
-    if (window.showToast) {
-      window.showToast(isOff ? '➡️ Repeat Off' : (isAll ? '🔁 Repeat All' : '🔂 Repeat One'));
+    if (tabName === 'lyrics') {
+      this.syncLyricsScroll(true);
+    } else if (tabName === 'queue') {
+      this.renderQueueUI();
+    } else if (tabName === 'recommended') {
+      this.renderRecommendationsUI();
     }
   }
 
-  toggleMute() {
-    if (this.isMuted) {
-      this.isMuted = false;
-      this.audio.volume = this.volume;
-      this.updateVolumeUI(this.volume);
-    } else {
-      this.isMuted = true;
-      this.audio.volume = 0;
-      this.updateVolumeUI(0);
-    }
+  // --- Scrubber Helper ---
+  setupScrubber(element, callback) {
+    if (!element) return;
+    let isDragging = false;
+
+    const handleScrub = (e) => {
+      const rect = element.getBoundingClientRect();
+      let clickX = (e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0].clientX)) - rect.left;
+      let pct = Math.max(0, Math.min(1, clickX / rect.width));
+      callback(pct);
+    };
+
+    element.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      handleScrub(e);
+      const onMouseMove = (ev) => {
+        if (isDragging) handleScrub(ev);
+      };
+      const onMouseUp = () => {
+        isDragging = false;
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    });
+
+    element.addEventListener('touchstart', (e) => {
+      isDragging = true;
+      handleScrub(e);
+      const onTouchMove = (ev) => {
+        if (isDragging) handleScrub(ev);
+      };
+      const onTouchEnd = () => {
+        isDragging = false;
+        window.removeEventListener('touchmove', onTouchMove);
+        window.removeEventListener('touchend', onTouchEnd);
+      };
+      window.addEventListener('touchmove', onTouchMove);
+      window.addEventListener('touchend', onTouchEnd);
+    }, { passive: true });
   }
 
-  setVolume(val) {
-    this.volume = Math.max(0, Math.min(1, val));
-    this.isMuted = false;
-    this.audio.volume = this.volume;
-    localStorage.setItem('etsuko_volume', this.volume);
-    this.updateVolumeUI(this.volume);
-  }
-
-  updateVolumeUI(val) {
-    const pct = `${val * 100}%`;
-    if (this.volumeProgress) this.volumeProgress.style.width = pct;
-    if (this.expandedVolumeFill) this.expandedVolumeFill.style.width = pct;
-
-    if (val === 0 || this.isMuted) {
-      if (this.iconVolHigh) this.iconVolHigh.style.display = 'none';
-      if (this.iconVolMute) this.iconVolMute.style.display = 'block';
-    } else {
-      if (this.iconVolHigh) this.iconVolHigh.style.display = 'block';
-      if (this.iconVolMute) this.iconVolMute.style.display = 'none';
-    }
-  }
-
-  showSpinner(show) {
-    if (this.coverSpinner) this.coverSpinner.style.display = show ? 'block' : 'none';
-  }
-
-  async playTrack(track, queueList = null) {
+  // --- Core Track Playback ---
+  async playTrack(track, queueList = null, isNavigating = false) {
     if (!track || !track.videoId) return;
 
-    this.currentTrack = track;
-    this.playedTrackHistory.add(track.videoId);
+    const playToken = ++this.currentPlayToken;
 
     if (queueList && Array.isArray(queueList) && queueList.length > 0) {
+      // User launched an explicit playlist/album
       this.isExplicitQueue = true;
-      this.queue = [...queueList];
-      this.queueIndex = this.queue.findIndex(t => t.videoId === track.videoId);
-      if (this.queueIndex === -1) {
-        this.queue.unshift(track);
-        this.queueIndex = 0;
+      const idx = queueList.findIndex(t => t.videoId === track.videoId);
+      if (idx !== -1) {
+        this.playedHistory = queueList.slice(0, idx);
+        this.queue = queueList.slice(idx + 1);
+      } else {
+        this.queue = queueList.filter(t => t.videoId !== track.videoId);
+        this.playedHistory = [];
       }
-    } else {
+      this.currentTrack = track;
+    } else if (!isNavigating) {
+      // User clicked a brand new seed track from Search or Home
       this.isExplicitQueue = false;
-      this.recommendedTracks = this.recommendedTracks.filter(t => t.videoId !== track.videoId);
-      this.queue = [track, ...this.recommendedTracks];
-      this.queueIndex = 0;
+      this.playedHistory = [];
+      this.queue = this.queue.filter(t => t.videoId !== track.videoId);
+      this.currentTrack = track;
+      this.loadRecommendations(track, playToken);
+    } else {
+      // Navigating (next / prev) within existing queue: preserve queue & history
+      this.currentTrack = track;
     }
 
     // Update Bottom & Expanded Metas
@@ -574,7 +487,7 @@ class EtsukoPlayer {
       body: JSON.stringify(track)
     }).catch(() => {});
 
-    // Stream Audio through local proxy (supports instant offline serving if downloaded)
+    // Stream Audio through local proxy
     try {
       this.userPaused = false;
       this.audio.src = `/api/proxy_stream/${encodeURIComponent(track.videoId)}`;
@@ -597,10 +510,8 @@ class EtsukoPlayer {
       }
     }
 
-    // Fetch Lyrics & Recommendations in parallel
+    // Fetch Lyrics in parallel
     this.loadLyrics(track);
-    this.loadRecommendations(track);
-    this.checkTrackDownloadStatus(track);
 
     window.dispatchEvent(new CustomEvent('etsuko:track-started', { detail: track }));
     this.renderQueueUI();
@@ -610,7 +521,7 @@ class EtsukoPlayer {
     const thumb = track.thumbnail || 'assets/default_cover.png';
     if (this.playerCover) {
       this.playerCover.src = thumb;
-      this.playerCover.onerror = () => { this.playerCover.src = 'assets/default_cover.png'; };
+      this.fitCoverImage(this.playerCover);
     }
     if (this.playerTitle) this.playerTitle.textContent = track.title || 'Unknown Title';
     if (this.playerArtist) this.playerArtist.textContent = track.artist || 'Unknown Artist';
@@ -627,14 +538,13 @@ class EtsukoPlayer {
     }
     if (this.expandedCoverImg) {
       this.expandedCoverImg.src = thumb;
-      this.expandedCoverImg.onerror = () => { this.expandedCoverImg.src = 'assets/default_cover.png'; };
+      this.fitCoverImage(this.expandedCoverImg);
     }
     if (this.expandedTitle) this.expandedTitle.textContent = track.title || 'Unknown Title';
     if (this.expandedArtist) this.expandedArtist.textContent = track.artist || 'Unknown Artist';
     if (this.expandedAlbum) this.expandedAlbum.textContent = track.album || 'Master Audio Quality';
 
     this.updateLikeButtonState(!!track.isLiked);
-    this.updateDownloadButtonState();
   }
 
   updateLikeButtonState(isLiked) {
@@ -647,56 +557,6 @@ class EtsukoPlayer {
       this.expandedLikeBtn.classList.toggle('liked', isLiked);
       const svg = this.expandedLikeBtn.querySelector('svg');
       if (svg) svg.setAttribute('fill', isLiked ? '#ec4899' : 'none');
-    }
-  }
-
-  updateDownloadButtonState() {
-    if (!this.currentTrack || !this.expandedDownloadBtn) return;
-    const isDl = this.downloadedVideoIds.has(this.currentTrack.videoId);
-    this.expandedDownloadBtn.classList.toggle('downloaded', isDl);
-    this.expandedDownloadBtn.title = isDl ? 'Downloaded for Offline Playback' : 'Download for Offline Playback';
-    const svg = this.expandedDownloadBtn.querySelector('svg');
-    if (svg) {
-      if (isDl) {
-        svg.innerHTML = '<path d="M20 6L9 17l-5-5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>';
-      } else {
-        svg.innerHTML = '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line>';
-      }
-    }
-  }
-
-  async checkTrackDownloadStatus(track) {
-    if (!track || !track.videoId || !window.api) return;
-    try {
-      const isDl = await window.api.checkDownloadStatus(track.videoId);
-      if (isDl) {
-        this.downloadedVideoIds.add(track.videoId);
-      } else {
-        this.downloadedVideoIds.delete(track.videoId);
-      }
-      this.updateDownloadButtonState();
-    } catch (e) {}
-  }
-
-  async downloadCurrentTrack() {
-    if (!this.currentTrack || !window.api) return;
-    const track = this.currentTrack;
-    if (this.downloadedVideoIds.has(track.videoId)) {
-      if (window.showToast) window.showToast(`"${track.title}" is already stored offline.`);
-      return;
-    }
-
-    if (window.showToast) window.showToast(`Saving "${track.title}" for offline playback...`);
-    try {
-      const res = await window.api.downloadTrack(track);
-      if (res && res.success) {
-        this.downloadedVideoIds.add(track.videoId);
-        this.updateDownloadButtonState();
-        if (window.showToast) window.showToast(`Downloaded "${track.title}" successfully!`);
-        window.dispatchEvent(new CustomEvent('etsuko:downloads-updated'));
-      }
-    } catch (e) {
-      if (window.showToast) window.showToast('Download error. Please retry.');
     }
   }
 
@@ -743,101 +603,67 @@ class EtsukoPlayer {
   }
 
   // --- Recommendation Engine (Single Source of Truth) ---
-  async loadRecommendations(track) {
+  async loadRecommendations(track, token = null) {
     if (!track || !window.api) return;
+    this.isFetchingRecommendations = true;
     try {
       const recData = await window.api.getRelatedTracks(track);
-      const fresh = recData.tracks || [];
+      if (token && token !== this.currentPlayToken) return;
 
-      // Update vibe tag
+      const fresh = (recData.tracks || []).filter(t => t.videoId !== track.videoId);
+
       if (this.expandedRecVibeTag) {
-        this.expandedRecVibeTag.textContent = `${recData.displayTag} · Based on ${track.title}`;
+        this.expandedRecVibeTag.textContent = `${recData.displayTag || 'VIBE'} · Based on ${track.title}`;
       }
 
-      this.recommendedTracks = fresh;
+      this.recommendedPool = fresh;
       if (!this.isExplicitQueue) {
-        this.queue = [track, ...this.recommendedTracks];
-        this.queueIndex = 0;
+        this.queue = [...fresh];
       }
 
       this.renderRecommendationsUI();
       this.renderQueueUI();
     } catch (e) {
       console.warn('[Player] loadRecommendations error:', e);
+    } finally {
+      this.isFetchingRecommendations = false;
     }
   }
 
-  async replenishRecommendations(currentTrack) {
-    if (!window.api || !currentTrack) return;
+  async replenishRecommendations(currentTrack, playImmediately = false) {
+    if (!window.api || !currentTrack || this.isFetchingRecommendations) return;
+    this.isFetchingRecommendations = true;
     try {
       const recData = await window.api.getRelatedTracks(currentTrack);
       const candidates = (recData.tracks || []).filter(t =>
-        !this.playedTrackHistory.has(t.videoId) &&
-        !this.recommendedTracks.some(r => r.videoId === t.videoId)
+        t.videoId !== (this.currentTrack ? this.currentTrack.videoId : '') &&
+        !this.playedHistory.some(p => p.videoId === t.videoId) &&
+        !this.queue.some(q => q.videoId === t.videoId)
       );
+
       if (candidates.length > 0) {
-        this.recommendedTracks.push(...candidates);
-        if (!this.isExplicitQueue) {
-          this.queue = [this.currentTrack, ...this.recommendedTracks];
-        }
-        this.renderRecommendationsUI();
+        this.queue.push(...candidates);
         this.renderQueueUI();
-      }
-    } catch (e) {}
-  }
+        this.renderRecommendationsUI();
 
-  async triggerAutoplayFromRecommendations() {
-    if (this.recommendedTracks && this.recommendedTracks.length > 0) {
-      let nextTrack = null;
-      if (this.isShuffle) {
-        const randIdx = Math.floor(Math.random() * this.recommendedTracks.length);
-        nextTrack = this.recommendedTracks.splice(randIdx, 1)[0];
-      } else {
-        nextTrack = this.recommendedTracks.shift();
-      }
-
-      if (nextTrack) {
-        this.playedTrackHistory.add(nextTrack.videoId);
-        this.queue = [nextTrack, ...this.recommendedTracks];
-        this.queueIndex = 0;
-        this.isExplicitQueue = false;
-        this.playTrack(nextTrack);
-
-        if (this.recommendedTracks.length < 5) {
-          this.replenishRecommendations(nextTrack);
+        if (playImmediately && (!this.currentTrack || this.audio.paused)) {
+          this.next();
         }
-        return;
       }
-    }
-
-    // If pool empty, try to fetch new recommendations
-    if (this.currentTrack && window.api) {
-      try {
-        const recData = await window.api.getRelatedTracks(this.currentTrack);
-        const fresh = recData.tracks || [];
-        if (fresh.length > 0) {
-          this.recommendedTracks = fresh;
-          const nextTrack = this.recommendedTracks.shift();
-          this.playedTrackHistory.add(nextTrack.videoId);
-          this.queue = [nextTrack, ...this.recommendedTracks];
-          this.queueIndex = 0;
-          this.isExplicitQueue = false;
-          this.playTrack(nextTrack);
-        }
-      } catch (e) {}
+    } catch (e) {
+    } finally {
+      this.isFetchingRecommendations = false;
     }
   }
 
   clearUpcomingQueue() {
-    this.recommendedTracks = [];
-    this.queue = this.currentTrack ? [this.currentTrack] : [];
-    this.queueIndex = 0;
+    this.queue = [];
     this.renderQueueUI();
     this.renderRecommendationsUI();
     if (window.showToast) window.showToast('Upcoming queue cleared.');
   }
 
-  // --- Lyrics Subsystem ---
+  // --- Lyrics Subsystem (Old-Line Dissolve Engine) ---
   async loadLyrics(track) {
     if (!this.expandedLyricsContainer) return;
     this.expandedLyricsContainer.innerHTML = '<div class="lyrics-placeholder">Searching studio lyrics...</div>';
@@ -871,16 +697,18 @@ class EtsukoPlayer {
     this.expandedLyricsContainer.innerHTML = '';
     lines.forEach((line, idx) => {
       const p = document.createElement('div');
-      p.className = 'expanded-lyrics-line';
+      p.className = 'expanded-lyrics-line upcoming';
       p.setAttribute('data-index', idx);
       p.setAttribute('data-time', line.time);
       p.textContent = line.text;
       p.onclick = () => {
         this.audio.currentTime = line.time;
         if (this.audio.paused) this.audio.play();
+        this.syncLyricsScroll(true);
       };
       this.expandedLyricsContainer.appendChild(p);
     });
+    this.syncLyricsScroll(true);
   }
 
   renderPlainLyrics(text) {
@@ -895,7 +723,7 @@ class EtsukoPlayer {
     });
   }
 
-  syncLyricsScroll() {
+  syncLyricsScroll(force = false) {
     if (!this.currentLyrics || this.currentLyrics.type !== 'synced') return;
     const currentTime = this.audio.currentTime || 0;
     const lines = this.currentLyrics.lines || [];
@@ -909,28 +737,45 @@ class EtsukoPlayer {
       }
     }
 
-    if (activeIdx !== this.activeLyricIndex) {
+    if (activeIdx !== this.activeLyricIndex || force) {
       this.activeLyricIndex = activeIdx;
       const allLineEls = this.expandedLyricsContainer.querySelectorAll('.expanded-lyrics-line');
+
       allLineEls.forEach((el, i) => {
-        if (i === activeIdx) {
+        if (activeIdx === -1) {
+          el.classList.remove('passed', 'active');
+          el.classList.add('upcoming');
+        } else if (i < activeIdx) {
+          // Past line: dissolves and collapses so the singing line is ALWAYS on top!
+          el.classList.add('passed');
+          el.classList.remove('active', 'upcoming');
+        } else if (i === activeIdx) {
+          // Active singing line: vibrant, prominent, positioned right at top
           el.classList.add('active');
-          if (this.autoScrollLyrics && this.expandedOverlay && this.expandedOverlay.classList.contains('open')) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
+          el.classList.remove('passed', 'upcoming');
         } else {
-          el.classList.remove('active');
+          // Upcoming lines below active line
+          el.classList.add('upcoming');
+          el.classList.remove('passed', 'active');
         }
       });
+
+      // Keep singing line pinned right at the top
+      if (this.autoScrollLyrics && this.expandedOverlay && this.expandedOverlay.classList.contains('open')) {
+        this.expandedLyricsContainer.scrollTo({
+          top: 0,
+          behavior: 'smooth'
+        });
+      }
     }
   }
 
   // --- Render Queue & Recommendations UI ---
   renderQueueUI() {
-    // 1. Expanded Player Queue
+    // 1. Expanded Player Queue List
     if (this.expandedQueueList) {
       this.expandedQueueList.innerHTML = '';
-      const upcoming = this.queue.slice(this.queueIndex + 1);
+      const upcoming = this.queue || [];
       if (this.expandedQueueCount) {
         this.expandedQueueCount.textContent = `${upcoming.length} tracks`;
       }
@@ -943,7 +788,9 @@ class EtsukoPlayer {
           card.className = 'expanded-track-card';
           card.innerHTML = `
             <div class="expanded-track-card-left">
-              <img class="expanded-card-thumb" src="${t.thumbnail || 'assets/default_cover.png'}" onerror="this.src='assets/default_cover.png'">
+              <div class="expanded-card-thumb-wrap">
+                <img class="expanded-card-thumb" src="${t.thumbnail || 'assets/default_cover.png'}">
+              </div>
               <div class="expanded-card-info">
                 <div class="expanded-card-title">${t.title}</div>
                 <div class="expanded-card-artist">${t.artist}</div>
@@ -955,19 +802,24 @@ class EtsukoPlayer {
             </div>
           `;
 
+          const img = card.querySelector('img');
+          this.fitCoverImage(img);
+
           card.onclick = (e) => {
             if (e.target.closest('.btn-card-remove')) return;
-            this.queueIndex = this.queueIndex + 1 + i;
-            this.playTrack(t);
+            // Move preceding tracks in queue to history
+            const skipped = this.queue.splice(0, i);
+            if (this.currentTrack) skipped.unshift(this.currentTrack);
+            this.playedHistory.push(...skipped);
+            const nextTrack = this.queue.shift();
+            this.playTrack(nextTrack, null, true);
           };
 
           const removeBtn = card.querySelector('.btn-card-remove');
           if (removeBtn) {
             removeBtn.onclick = (e) => {
               e.stopPropagation();
-              const realIdx = this.queueIndex + 1 + i;
-              this.queue.splice(realIdx, 1);
-              this.recommendedTracks = this.recommendedTracks.filter(rt => rt.videoId !== t.videoId);
+              this.queue.splice(i, 1);
               this.renderQueueUI();
             };
           }
@@ -984,7 +836,10 @@ class EtsukoPlayer {
   renderRecommendationsUI() {
     if (!this.expandedRecList) return;
     this.expandedRecList.innerHTML = '';
-    const recs = this.recommendedTracks || [];
+    const recs = (this.recommendedPool || []).filter(t =>
+      t.videoId !== (this.currentTrack ? this.currentTrack.videoId : '') &&
+      !this.queue.some(q => q.videoId === t.videoId)
+    );
 
     if (recs.length === 0) {
       this.expandedRecList.innerHTML = '<div style="color:var(--text-muted); font-size:13px; text-align:center; padding:32px;">Generating vibe recommendations...</div>';
@@ -996,7 +851,9 @@ class EtsukoPlayer {
       card.className = 'expanded-track-card';
       card.innerHTML = `
         <div class="expanded-track-card-left">
-          <img class="expanded-card-thumb" src="${t.thumbnail || 'assets/default_cover.png'}" onerror="this.src='assets/default_cover.png'">
+          <div class="expanded-card-thumb-wrap">
+            <img class="expanded-card-thumb" src="${t.thumbnail || 'assets/default_cover.png'}">
+          </div>
           <div class="expanded-card-info">
             <div class="expanded-card-title">${t.title}</div>
             <div class="expanded-card-artist">${t.artist}</div>
@@ -1010,49 +867,76 @@ class EtsukoPlayer {
         </div>
       `;
 
+      const img = card.querySelector('img');
+      this.fitCoverImage(img);
+
       card.onclick = () => {
-        this.recommendedTracks = this.recommendedTracks.filter(item => item.videoId !== t.videoId);
-        this.queue = [t, ...this.recommendedTracks];
-        this.queueIndex = 0;
-        this.isExplicitQueue = false;
-        this.playTrack(t);
+        if (this.currentTrack) this.playedHistory.push(this.currentTrack);
+        this.recommendedPool = (this.recommendedPool || []).filter(item => item.videoId !== t.videoId);
+        this.playTrack(t, null, true);
       };
 
       this.expandedRecList.appendChild(card);
     });
   }
 
-  handlePlaybackFailure() {
-    this.showSpinner(false);
-    if (this.failureSkipTimer) {
-      clearTimeout(this.failureSkipTimer);
-      this.failureSkipTimer = null;
-    }
-    this.consecutiveFailures = (this.consecutiveFailures || 0) + 1;
-    const title = this.currentTrack ? this.currentTrack.title : 'this track';
-
-    if (this.consecutiveFailures >= 3) {
-      if (window.showToast) {
-        window.showToast('Multiple tracks failed to stream. Playback paused.');
-      }
-      this.consecutiveFailures = 0;
-      this.isPlaying = false;
-      this.onPlayStateChange(false);
+  // --- Playback Navigation Controls ---
+  next() {
+    if (this.queue.length === 0) {
+      this.replenishRecommendations(this.currentTrack, true);
       return;
     }
 
-    if (window.showToast) {
-      window.showToast(`Unable to stream "${title}". Skipping to next...`);
+    let nextTrack = null;
+    if (this.isShuffle) {
+      const randIdx = Math.floor(Math.random() * this.queue.length);
+      nextTrack = this.queue.splice(randIdx, 1)[0];
+    } else {
+      nextTrack = this.queue.shift();
     }
-    this.failureSkipTimer = setTimeout(() => {
+
+    if (nextTrack) {
+      if (this.currentTrack) {
+        this.playedHistory.push(this.currentTrack);
+      }
+      this.playTrack(nextTrack, null, true);
+
+      if (this.queue.length < 5) {
+        this.replenishRecommendations(nextTrack);
+      }
+    }
+  }
+
+  prev() {
+    if (this.audio.currentTime > 3) {
+      this.audio.currentTime = 0;
+      return;
+    }
+
+    if (this.playedHistory.length > 0) {
+      const prevTrack = this.playedHistory.pop();
+      if (this.currentTrack) {
+        this.queue.unshift(this.currentTrack);
+      }
+      this.playTrack(prevTrack, null, true);
+    } else {
+      this.audio.currentTime = 0;
+    }
+  }
+
+  onEnded() {
+    if (this.repeatMode === 2) {
+      this.audio.currentTime = 0;
+      this.audio.play();
+    } else {
       this.next();
-    }, 1600);
+    }
   }
 
   togglePlay() {
     if (!this.audio.src || !this.currentTrack) {
       if (this.queue.length > 0) {
-        this.playTrack(this.queue[0]);
+        this.next();
       }
       return;
     }
@@ -1081,48 +965,73 @@ class EtsukoPlayer {
     }
   }
 
-  next() {
-    if (this.queue.length === 0 && (!this.recommendedTracks || this.recommendedTracks.length === 0)) return;
+  toggleShuffle() {
+    this.isShuffle = !this.isShuffle;
+    if (this.shuffleDot) this.shuffleDot.classList.toggle('active', this.isShuffle);
+    if (this.btnShuffle) this.btnShuffle.classList.toggle('active', this.isShuffle);
+    if (this.expandedShuffleDot) this.expandedShuffleDot.classList.toggle('active', this.isShuffle);
+    if (this.expandedBtnShuffle) this.expandedBtnShuffle.classList.toggle('active', this.isShuffle);
+    if (window.showToast) window.showToast(this.isShuffle ? 'Shuffle Enabled' : 'Shuffle Disabled');
+  }
 
-    if (this.isShuffle) {
-      const remainingUpcoming = this.queue.slice(this.queueIndex + 1);
-      if (remainingUpcoming.length > 0) {
-        const rand = Math.floor(Math.random() * remainingUpcoming.length);
-        this.queueIndex = this.queueIndex + 1 + rand;
-        this.playTrack(this.queue[this.queueIndex]);
-        return;
-      }
+  cycleRepeat() {
+    this.repeatMode = (this.repeatMode + 1) % 3;
+    const states = ['Repeat Off', 'Repeat All', 'Repeat One'];
+
+    // Bottom Repeat
+    if (this.repeatDot) this.repeatDot.classList.toggle('active', this.repeatMode > 0);
+    if (this.btnRepeat) this.btnRepeat.classList.toggle('active', this.repeatMode > 0);
+    if (this.repeatBadge) {
+      this.repeatBadge.style.display = this.repeatMode === 2 ? 'block' : 'none';
+      this.repeatBadge.textContent = '1';
     }
 
-    if (this.queueIndex < this.queue.length - 1) {
-      this.queueIndex++;
-      this.playTrack(this.queue[this.queueIndex]);
+    // Expanded Repeat
+    if (this.expandedRepeatDot) this.expandedRepeatDot.classList.toggle('active', this.repeatMode > 0);
+    if (this.expandedBtnRepeat) this.expandedBtnRepeat.classList.toggle('active', this.repeatMode > 0);
+    if (this.expandedRepeatBadge) {
+      this.expandedRepeatBadge.style.display = this.repeatMode === 2 ? 'block' : 'none';
+      this.expandedRepeatBadge.textContent = '1';
+    }
+
+    if (window.showToast) window.showToast(states[this.repeatMode]);
+  }
+
+  setVolume(pct) {
+    this.volume = Math.max(0, Math.min(1, pct));
+    this.isMuted = this.volume === 0;
+    this.audio.volume = this.volume;
+    localStorage.setItem('etsuko_volume', this.volume.toFixed(2));
+    this.updateVolumeUI(this.volume);
+  }
+
+  toggleMute() {
+    if (this.isMuted) {
+      this.isMuted = false;
+      this.setVolume(this.prevVolume || 0.75);
     } else {
-      // Smart Autoplay from single source of truth
-      this.triggerAutoplayFromRecommendations();
+      this.prevVolume = this.volume;
+      this.setVolume(0);
+      this.isMuted = true;
     }
   }
 
-  prev() {
-    if (this.audio.currentTime > 3) {
-      this.audio.currentTime = 0;
-      return;
-    }
-    if (this.queueIndex > 0) {
-      this.queueIndex--;
-      this.playTrack(this.queue[this.queueIndex]);
+  updateVolumeUI(vol) {
+    const pct = (vol * 100).toFixed(0);
+    if (this.volumeProgress) this.volumeProgress.style.width = `${pct}%`;
+    if (this.expandedVolumeFill) this.expandedVolumeFill.style.width = `${pct}%`;
+
+    if (vol === 0 || this.isMuted) {
+      if (this.iconVolHigh) this.iconVolHigh.style.display = 'none';
+      if (this.iconVolMute) this.iconVolMute.style.display = 'block';
     } else {
-      this.audio.currentTime = 0;
+      if (this.iconVolHigh) this.iconVolHigh.style.display = 'block';
+      if (this.iconVolMute) this.iconVolMute.style.display = 'none';
     }
   }
 
-  onEnded() {
-    if (this.repeatMode === 2) {
-      this.audio.currentTime = 0;
-      this.audio.play();
-    } else {
-      this.next();
-    }
+  showSpinner(show) {
+    if (this.coverSpinner) this.coverSpinner.style.display = show ? 'block' : 'none';
   }
 
   onTimeUpdate() {
@@ -1141,40 +1050,90 @@ class EtsukoPlayer {
     if (this.expandedCurrentTime) this.expandedCurrentTime.textContent = this.formatTime(current);
     if (this.expandedTotalDuration) this.expandedTotalDuration.textContent = this.formatTime(duration);
 
-    // Sync active lyric line
+    // Synchronize Lyrics with Dissolving Passed Lines
     this.syncLyricsScroll();
-
-    window.dispatchEvent(new CustomEvent('etsuko:time-update', {
-      detail: { currentTime: current, duration: duration }
-    }));
   }
 
-  onProgress() {
-    if (this.audio.buffered.length > 0 && this.audio.duration) {
-      const bufferedEnd = this.audio.buffered.end(this.audio.buffered.length - 1);
-      const percent = (bufferedEnd / this.audio.duration) * 100;
-      if (this.scrubberBuffered) this.scrubberBuffered.style.width = `${percent}%`;
-      if (this.expandedScrubberBuffered) this.expandedScrubberBuffered.style.width = `${percent}%`;
+  updateBufferProgress() {
+    if (!this.audio.duration || !this.audio.buffered.length) return;
+    const bufferedEnd = this.audio.buffered.end(this.audio.buffered.length - 1);
+    const duration = this.audio.duration;
+    const pct = (bufferedEnd / duration) * 100;
+    if (this.scrubberBuffered) this.scrubberBuffered.style.width = `${pct}%`;
+    if (this.expandedScrubberBuffered) this.expandedScrubberBuffered.style.width = `${pct}%`;
+  }
+
+  handlePlaybackFailure() {
+    this.consecutiveFailures++;
+    const title = this.currentTrack ? this.currentTrack.title : 'Track';
+    if (this.consecutiveFailures >= 3) {
+      if (window.showToast) {
+        window.showToast('Multiple playback issues detected. Network stream paused.');
+      }
+      this.onPlayStateChange(false);
+      return;
     }
+
+    if (window.showToast) {
+      window.showToast(`Unable to stream "${title}". Skipping to next...`);
+    }
+    clearTimeout(this.failureSkipTimer);
+    this.failureSkipTimer = setTimeout(() => {
+      this.next();
+    }, 1600);
+  }
+
+  handleAudioError(e) {
+    if (this.userPaused) return;
+    console.warn('[Etsuko] HTMLAudioElement error:', e);
+    this.handlePlaybackFailure();
   }
 
   formatTime(secs) {
-    if (isNaN(secs)) return '0:00';
+    if (!secs || isNaN(secs)) return '0:00';
     const m = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   }
 
   updateActiveTrackHighlight() {
-    document.querySelectorAll('.track-row').forEach(row => {
-      const vid = row.getAttribute('data-videoid');
-      if (this.currentTrack && vid === this.currentTrack.videoId) {
-        row.classList.add('playing');
-      } else {
-        row.classList.remove('playing');
-      }
+    if (!this.currentTrack) return;
+    const currentVid = this.currentTrack.videoId;
+    document.querySelectorAll('.track-row, .expanded-track-card, .track-card').forEach(el => {
+      const vid = el.getAttribute('data-video-id');
+      el.classList.toggle('active', vid === currentVid);
     });
+  }
+
+  renderVisualizer() {
+    if (!this.canvasCtx || !this.analyser || !this.dataArray) return;
+    const draw = () => {
+      requestAnimationFrame(draw);
+      if (!this.isPlaying) return;
+
+      this.analyser.getByteFrequencyData(this.dataArray);
+      const width = this.canvasVisualizer.width;
+      const height = this.canvasVisualizer.height;
+      this.canvasCtx.clearRect(0, 0, width, height);
+
+      const barWidth = 3;
+      const gap = 2;
+      const barCount = Math.floor(width / (barWidth + gap));
+      let x = 0;
+
+      for (let i = 0; i < barCount; i++) {
+        const val = this.dataArray[i % this.dataArray.length] / 255;
+        const barHeight = Math.max(2, val * height * 0.85);
+        this.canvasCtx.fillStyle = `rgba(0, 240, 255, ${0.3 + val * 0.7})`;
+        this.canvasCtx.fillRect(x, height - barHeight, barWidth, barHeight);
+        x += barWidth + gap;
+      }
+    };
+    draw();
   }
 }
 
-window.player = new EtsukoPlayer();
+// Global Player Singleton
+window.addEventListener('DOMContentLoaded', () => {
+  window.player = new EtsukoPlayer();
+});

@@ -104,12 +104,14 @@ def resolve_audio_stream(video_id, force=False):
         print(f"[Etsuko] Error resolving stream for {video_id}: {e}")
     return None
 
-def clean_thumbnail(thumbnails):
+def clean_thumbnail(thumbnails, video_id=None):
     if not thumbnails:
-        return "assets/default_cover.png"
+        return f"https://i.ytimg.com/vi/{video_id}/hq720.jpg" if video_id else "assets/default_cover.png"
     url = thumbnails[-1]['url']
     if "=" in url:
         url = url.split("=")[0] + "=w544-h544-l90-rj"
+    elif "hqdefault.jpg" in url and video_id:
+        url = f"https://i.ytimg.com/vi/{video_id}/hq720.jpg"
     return url
 
 # Verified high-res 1:1 square hits for zero-delay startup with zero letterboxing
@@ -182,7 +184,7 @@ def search_tracks():
                         "artist": artists,
                         "album": album,
                         "duration": r.get('duration', '3:30'),
-                        "thumbnail": clean_thumbnail(r.get('thumbnails', [])),
+                        "thumbnail": clean_thumbnail(r.get('thumbnails', []), video_id),
                         "isLiked": db.is_liked(video_id)
                     })
                 elif filter_type == 'albums' or result_type == 'album':
@@ -241,7 +243,7 @@ def search_tracks():
                         "artist": entry.get('uploader', 'Unknown Artist'),
                         "album": "",
                         "duration": f"{m}:{s:02d}",
-                        "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                        "thumbnail": f"https://i.ytimg.com/vi/{vid}/hq720.jpg",
                         "isLiked": db.is_liked(vid)
                     })
         except Exception as e:
